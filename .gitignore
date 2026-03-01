@@ -2,8 +2,18 @@
 .vscode/
 build/
 target/
+out/
+*.iml
 
 *.db
 
-*.iml
-out/
+# Runtime/server-side files (keep local, don't track)
+addons/
+lang/
+arenas.yml
+config.yml
+kits.yml
+modes.yml
+pending-restores.db
+match-recovery.db
+
