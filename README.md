@@ -13,7 +13,7 @@ Advanced PvP practice plugin for Paper/Folia with duel flow, queue matching, are
 
 ## Compatibility
 
-- Java 17+
+- Java 21+
 - Paper/Folia 1.21.x
 - Maven build (artifact: `pvparena-light-1.0.7.jar`)
 
