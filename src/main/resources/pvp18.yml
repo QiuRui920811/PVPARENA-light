@@ -1,0 +1,68 @@
+# 1.8 (legacy) combat tuning. These settings only apply to modes with legacyPvp=true.
+
+attackSpeed: 1024.0          # Attack speed base value while in legacy mode (high value disables 1.9+ cooldown feel)
+maxNoDamageTicks: 10         # Max invulnerability ticks after hit (1.8-like i-frames)
+
+comboWindowMs: 700           # Combo window in ms (time between hits to keep a combo)
+maxCombo: 3                  # Max combo count used for combo knockback scaling
+
+baseKnockback: 0.24          # Base knockback strength (stickier combo profile)
+comboKnockback: 0.01         # Extra knockback per combo step
+knockbackY: 0.21             # Vertical knockback (lower launch)
+sprintKnockbackBonus: 0.015  # Extra knockback when attacker is sprinting
+
+unarmedKnockbackMultiplier: 0.6 # Knockback multiplier when attacker is unarmed
+unarmedCombo: false             # Allow unarmed combo scaling
+
+airborneKnockbackMultiplier: 0.75 # Knockback multiplier when attacker is airborne
+landingResetsCombo: true         # Reset combo counter when landing
+
+disableOffhand: true          # Disable offhand usage in legacy mode
+forceIFramesOnHit: true       # Force i-frames on hit (helps consistent 1.8 feeling)
+
+jumpReset:
+  enabled: true               # Jump reset support
+  windowMs: 120               # Time window (ms) after a jump where jump reset is active
+  multiplier: 0.6             # Knockback multiplier when jump reset is active
+  yMultiplier: 0.6            # Extra multiplier for vertical knockback during jump reset
+
+fish:
+  maxDistance: 33.0           # Max distance for rod pull simulation
+  pullMultiplier: 0.10        # Pull strength multiplier
+  pullY: 0.15                 # Vertical pull
+  damage: 0.0                 # Optional extra damage from rod hit (0 = vanilla-like)
+  simulateDamage: 0.0001      # Tiny hit pulse to preserve feedback without real damage
+
+bow:
+  velocityMultiplier: 1.0     # Arrow velocity multiplier (1.0 = vanilla)
+  damageMultiplier: 1.0       # Arrow damage multiplier
+  disablePunch: true          # Disable Punch knockback
+  stripTipped: true           # Convert tipped arrows into normal arrows
+
+blockHit:
+  enabled: true               # Enable block-hit damage reduction simulation
+  windowMs: 160               # Right-click window (ms)
+  damageMultiplier: 0.78      # Damage multiplier while block-hit is active
+
+reachCheck:
+  enabled: false
+  meleeMaxReach: 3.1          # Hard cap for melee hit acceptance (if enabled)
+  meleeMaxVerticalDiff: 2.5   # Max vertical difference for melee reach check (if enabled)
+
+knockback:
+  horizontalMultiplier: 0.73  # Global horizontal knockback multiplier
+  verticalMultiplier: 0.66    # Global vertical knockback multiplier
+
+goldenApple:
+  enabled: true
+  absorptionHearts: 2.0       # Extra absorption hearts (in hearts, not HP)
+  regenSeconds: 5             # Regeneration duration in seconds
+  regenAmplifier: 1           # Regeneration amplifier (1 = Regeneration II)
+
+enchantedApple:
+  enabled: true
+  absorptionHearts: 8.0       # Extra absorption hearts
+  regenSeconds: 30            # Regeneration duration in seconds
+  regenAmplifier: 4           # Regeneration amplifier (4 = Regeneration V)
+  resistanceSeconds: 300      # Resistance duration in seconds
+  fireResSeconds: 300         # Fire resistance duration in seconds

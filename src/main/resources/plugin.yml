@@ -1,0 +1,30 @@
+name: PvPArena-Light
+main: com.pvparena.PvPArenaPlugin
+version: 1.0.5
+author: _RuCat
+api-version: '1.21'
+folia-supported: true
+softdepend: [ProtocolLib, Worlds, Multiverse-Core, SlimeWorldManager, HuskSync, PlaceholderAPI]
+commands:
+  pvp:
+    description: Open PVP menu
+    usage: /pvp [spec|spec <player>|spec leave]
+  duel:
+    description: Duel or open menu
+    usage: /duel [player|accept|result]
+  pk:
+    description: Toggle PVP mode
+    usage: /pk
+  pvparena:
+    description: PvP arena admin commands
+    usage: /pvparena <help|tool|specgui|kit|addkit|delkit|arena|create|delarena|setspawn|reload>
+    aliases: [paparena]
+  arena:
+    description: Arena management
+    usage: /arena <create|setspawn>
+permissions:
+  pvparena.admin:
+    default: op
+  pvparena.spectate:
+    description: Allows using /pvp spec and /pvp spectate
+    default: false

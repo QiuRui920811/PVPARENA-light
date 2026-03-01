@@ -1,0 +1,205 @@
+# PvPArena defaults (edit + /pvparena reload)
+# Quick setup:
+# - Use /arena create <id> [world] to register an arena (two spawns auto-set to your feet).
+#   (If you selected pos1/pos2 with setup tool first, create will auto-save arena bounds.)
+# - Set spawn points: /arena setspawn <id> <1|2> while standing at each spawn.
+# - Get setup tool: /pvparena tool
+# - Selection tool: left-click = pos1, right-click = pos2.
+# - Main commands: /pvp (queue menu), /duel <player|accept>, /pk (toggle world PK)
+# - Permissions:
+#   - pvparena.admin : all admin commands and setup tool access (/pvparena, /arena)
+#   - /pvp, /duel, /pk : open to players by default (lock with your permissions plugin if needed)
+# - World rules: edit world-rules.* for time/weather; set protection.require-pk-to-enter to true to allow only PK-enabled players to enter the protected world.
+
+language: "en" # messages.yml (zh) or messages_en.yml (en)
+
+pk:
+  enabled: true # allow players to toggle /pk. Set false to disable the command.
+
+protection:
+  enabled: true
+  arena-only: true # true = only inside defined arenas; false = whole protected world
+  world: "pv"     # legacy single world (used when protection.worlds is empty)
+  worlds: []       # e.g. ["pv", "pvp2"] ; takes priority over protection.world when non-empty
+  require-pk-to-enter: false # when false, anyone can enter; when true, must enable /pk to enter protected world
+  lock-adventure: true # set players to adventure inside protected area
+  # These block-* flags apply to GLOBAL protected-area world lock only.
+  # Match build/break is mode-level in modes.yml -> settings.build.enabled
+  block-break: true
+  block-place: true
+  block-interact: true
+  block-entity-interact: true
+  block-drop: true
+  block-pickup: true
+
+world-rules:
+  enabled: true         # apply rules to the protected world (only if protection.world is set)
+  time-lock: 6000       # set to -1 to skip locking time
+  daylight-cycle: false # set DO_DAYLIGHT_CYCLE
+  mob-spawning: false   # set DO_MOB_SPAWNING
+  weather-cycle: false  # set DO_WEATHER_CYCLE
+  clear-weather: true   # force clear weather when rules apply
+  tick-interval: 200    # how often (ticks) to enforce time/weather
+
+border:
+  enabled: true
+  lose-on-exit: true # true = leaving bounds ends match and declares loss
+  lose-reason-key: "border_lost"
+  warn-key: "border_warn" # used when lose-on-exit=false to warn and teleport back
+
+gui:
+  main:
+    size: 27          # inventory size (9,18,27,36,45,54)
+    start-slot: 10    # first mode item slot
+    step: 2           # slot step between mode items
+    cancel-slot: 22   # slot for cancel-queue button
+    # Optional: pin specific modes to slots by ID (others keep start+step)
+    # mode-slots:
+    #   gapple: 10
+    #   nodebuff: 12
+    # Optional static decorative items (e.g. glass border)
+    # decorations:
+    #   - slot: 0
+    #     material: GRAY_STAINED_GLASS_PANE
+    #     name: '&8'
+    #     lore: []
+    #     glow: false
+  duel:
+    size: 27          # inventory size (9,18,27,36,45,54)
+    start-slot: 10    # first opponent head slot
+    step: 2           # slot step between opponent heads
+    # Optional static decorative items (e.g. glass border)
+    # decorations:
+    #   - slot: 0
+    #     material: BLACK_STAINED_GLASS_PANE
+    #     name: '&8'
+    #     lore: []
+    #     glow: false
+
+duel:
+  request-timeout-seconds: 60 # invite timeout; after this, the duel request is cancelled
+
+queue:
+  timeout-seconds: 60        # wait this long in queue before auto-cancel (players notified)
+  bot-fallback-seconds: 15   # for legacy PVP bot modes, wait this long then start vs bot if still queued
+  bot-retry-seconds: 5       # if no arena free for bot, retry after this many seconds
+
+setup:
+  selection-tool: WOODEN_AXE # item used to set arena bounds (wand). Must be a valid material name.
+  selection-tool-name: "&bPvPArena Selection Tool"
+  selection-tool-lore:
+    - "&7Left click: set pos1"
+    - "&7Right click: set pos2"
+    - "&7Then use /arena create <id>"
+  selection-tool-glow: true
+  sneak-left-open-admin-menu: false
+  sneak-left-admin-command: "pvparena help"
+
+debug:
+  restore: false # enable detailed restore pipeline logs (snapshot add/peek/consume/restore)
+  combat: false # log duel damage pipeline (cancel/allow/uncancel) for troubleshooting
+  bigdoor: false # log built-in bigdoor open/close animation pipeline
+
+spectator:
+  enabled: true
+  vanish: true
+  hide-from-players: true
+  collidable: false
+  can-be-targeted: false
+  ignore-real-events: true # true=強制觀戰者不碰撞/不受擊/不參與任何實戰互動（建議保持 true）
+
+round-scoreboard:
+  enabled: true # show sidebar scoreboard in-match
+  update-interval-ticks: 20 # refresh interval for sidebar scoreboard
+  max-lines: 15 # Minecraft sidebar hard limit is 15 lines
+  fallback-actionbar: false # when sidebar disabled, show actionbar round text instead
+  title: "&b&lPvPArena &7| &f{mode_name}" # supports & codes, {variables}, and %PAPI%
+  variables:
+    server_name: "&fServer: &e%server_name%"
+    website: "&fWebsite: &bplay.example.com"
+  lines:
+    - "&7&m----------------"
+    - "&fMode: &b{mode_name}"
+    - "&fArena: &a{arena}"
+    - "&fRound: &e{round}&7/&e{rounds_to_win}"
+    - "&fScore: &b{your_score}&7 - &c{opponent_score}"
+    - "&fYou: &a{your_name} &7({your_ping}ms)"
+    - "&fOpp: &c{opponent_name} &7({opponent_ping}ms)"
+    - "&fYour HP: &a{your_health}"
+    - "&fOpp HP: &c{opponent_health}"
+    - "{server_name}"
+    - "{website}"
+    - "&7&m----------------"
+  # Built-in variables:
+  # {mode} {mode_name} {arena} {state} {round} {rounds_to_win}
+  # {your_name} {opponent_name} {your_score} {opponent_score}
+  # {your_health} {opponent_health} {your_ping} {opponent_ping}
+  bossbar-enabled: true # show round score BossBar (not the health bar)
+  bossbar-update-interval-ticks: 20
+
+match:
+  countdown-seconds: 5 # pre-fight countdown duration (seconds)
+  lock-movement-during-countdown: true # true=lock players in place during countdown; false=allow movement
+  round-end-use-vanilla-death-animation: true # true=let lethal hit trigger vanilla death animation (auto-respawn still handled)
+  round-end-showcase-ticks: 12 # finisher showcase duration before round-end message (ticks)
+  countdown-title:
+    fade-in-ms: 0 # title fade-in (milliseconds)
+    stay-ms: 800 # title stay duration (milliseconds)
+    fade-out-ms: 200 # title fade-out (milliseconds)
+
+health-bar:
+  enabled: true # opponent health BossBar
+  update-interval-ticks: 20 # refresh interval (ticks)
+  color: RED # PINK, BLUE, RED, GREEN, YELLOW, PURPLE, WHITE
+  style: SOLID # SOLID, SEGMENTED_6/10/12/20
+
+duel-tab:
+  enabled: false # TAB plugin compatibility mode by default; use %pvparena_*% in external TAB plugin
+  update-interval-ticks: 5
+  isolate-match-players-in-tab: true # for duel players, tab list shows only self + opponent
+  header: "&b&lPvPArena\n&f{your_name} &7vs &f{opponent_name}" # newline supports \n, {nl}, <nl>
+  footer: "&7Mode: &b{mode_name} &8| &7Round: &e{round}/{rounds_to_win}"
+  variables:
+    rank: "&fRank: &e%luckperms_primary_group_name%"
+  # Supports: & color codes, built-in {variables}, and PlaceholderAPI placeholders
+  # External TAB placeholders: %pvparena_in_match% %pvparena_mode% %pvparena_round%
+  # %pvparena_rounds_to_win% %pvparena_score_line% %pvparena_opponent%
+
+titlemsg:
+  countdown:
+    enabled: false # true = use animated countdown title frames
+    frame-offset: 1 # higher value => faster frame rotation per second
+    frames:
+      - "&b&l{seconds}"
+      - "&f&l{seconds}"
+      - "&e&l{seconds}"
+      - "&f&l{seconds}"
+    subtitle-frames:
+      - "&7Fight is starting..."
+      - "&fFight is starting..."
+  # Supports: & color codes, PlaceholderAPI, {seconds}, newline via \n/{nl}/<nl>
+
+hooks:
+  # available placeholders: <arena> <mode> <mode_name> <playerA> <playerB> <winner> <loser>
+  match-start-commands: []
+  match-end-commands: []   # placeholders: <arena> <mode> <mode_name> <playerA> <playerB> <winner> <loser>
+
+bigdoor:
+  enabled: true # built-in BigDoor-Lite toggle
+  blocks-per-tick: 256 # batch size per tick for instant apply/restore
+  max-blocks-per-door: 65536 # maximum scanned blocks per door
+  lift-smooth: true # true=use smooth entity interpolation for vertical lift
+  lift-smooth-max-blocks: 2048 # fallback to classic step animation above this block count
+  swing-smooth: true # true=use smooth entity interpolation for swing animation
+  swing-smooth-max-blocks: 2048 # fallback to classic step animation above this block count
+  animation-step-ticks: 2 # legacy step interval; used when animation-total-ticks=0
+  animation-total-ticks: 36 # total animation duration in ticks when >0 (higher = slower)
+  animation-ease-in-out: true # true=apply ease-in-out motion
+  # door data location in arenas.yml: arenas.<arenaId>.doors
+
+rollback:
+  blocks-per-tick: 384 # WorldEdit-style batch size per chunk per tick
+  bounds-expand: 5 # extra rollback border around arena bounds (recommended >=5 for crystal/explosion edge cleanup)
+  second-pass-delay-ticks: 12 # delayed verify pass (~0.6s) to catch late physics/explosion updates
+  full-baseline-capture: true # scan whole arena before each round for reliable restore
+  persist-baseline-to-db: false # true=write every changed block to crash-recovery DB (safer but slower in crystal/build modes)
