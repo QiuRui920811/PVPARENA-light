@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.7
+
+### Changed
+- Version bump for release packaging and metadata alignment.
+
 ## 1.0.5
 
 ### Added
