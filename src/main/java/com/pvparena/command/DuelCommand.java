@@ -48,7 +48,7 @@ public class DuelCommand implements CommandExecutor {
             duelManager.cancel(player, args.length >= 2 ? args[1] : null);
             return true;
         }
-        if (args[0].equalsIgnoreCase("leave")) {
+        if (args[0].equalsIgnoreCase("dleave") || args[0].equalsIgnoreCase("leave")) {
             if (matchManager.leaveWinnerLootPhase(player)) {
                 MessageUtil.send(player, "duel_leave_success");
             } else {

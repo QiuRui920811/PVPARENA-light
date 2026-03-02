@@ -6,7 +6,7 @@ Advanced PvP practice plugin for Paper/Folia with duel flow, queue matching, are
 
 - Queue + direct duel workflows (`/pvp`, `/duel`)
 - Multi-mode arena settings with per-mode kits
-- Winner loot phase + early leave (`/duel leave`)
+- Winner loot phase + early leave (`/duel dleave`)
 - Spectator browser, hotbar tools, and state isolation
 - Arena rollback and crash-recovery safeguards
 - Optional integrations: ProtocolLib, PlaceholderAPI, HuskSync
@@ -30,6 +30,28 @@ Advanced PvP practice plugin for Paper/Folia with duel flow, queue matching, are
 2. Set spawns: `/arena setspawn <id> <1|2>`
 3. Set bounds: `/arena setbounds <id> wand` (or coordinate mode)
 4. Open menu: `/pvp`
+
+## Winner Leave Wait Music
+
+Config path in `config.yml`:
+
+```yml
+match:
+	winner-leave-wait:
+		play-sound: true
+		sound: "music_disc.otherside"
+		volume: 1.0
+		pitch: 1.0
+```
+
+- Plays during winner loot/leave waiting phase.
+- Stops when player leaves early or when match ends.
+
+## Runtime SQLite Dependency
+
+- Build output is thin jar (no fat dependency bundle).
+- If sqlite driver is missing at startup, plugin auto-downloads it to `plugins/lib`.
+- If the jar already exists in `plugins/lib`, download is skipped.
 
 ## Commands
 

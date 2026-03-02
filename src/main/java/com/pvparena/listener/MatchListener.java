@@ -377,10 +377,34 @@ public class MatchListener implements Listener {
 
         if (victim instanceof Player victimPlayer) {
             MatchSession victimSession = matchManager.getMatch(victimPlayer);
+            boolean playerSourcedDamage = damager instanceof Player
+                    || (damager instanceof Projectile projectile && projectile.getShooter() instanceof Player);
             if (victimSession != null && victimSession.isFighting()
-                    && isLethalAfterAbsorption(victimPlayer, event.getFinalDamage())) {
+                    && isLethalAfterAbsorption(victimPlayer, event.getFinalDamage())
+                    && !playerSourcedDamage) {
                 if (hasTotem(victimPlayer)) {
                     event.setCancelled(false);
+                    return;
+                }
+                if (!victimSession.beginRoundResolution()) {
+                    event.setCancelled(true);
+                    return;
+                }
+                if (shouldUseVanillaDeathFlow(victimSession)) {
+                    cachePendingDeathDrops(victimPlayer);
+                    event.setCancelled(false);
+                    org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
+                    long resolveDelayTicks = Math.max(1L, victimSession.getRoundResolveDelayTicks());
+                    SchedulerUtil.runOnPlayerLater(plugin, victimPlayer, resolveDelayTicks + 2L, () -> {
+                        if (!victimPlayer.isOnline()) {
+                            return;
+                        }
+                        MatchSession current = matchManager.getMatch(victimPlayer);
+                        if (current != victimSession || !current.isRoundResolving()) {
+                            return;
+                        }
+                        matchManager.handleDeath(victimPlayer);
+                    });
                     return;
                 }
                 event.setCancelled(true);

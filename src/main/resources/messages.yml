@@ -56,6 +56,7 @@ messages:
   reason_player_offline: "玩家離線"
   reason_arena_spawn_unset: "Arena 出生點未設定"
   reason_teleport_failed: "傳送失敗"
+  reason_time_limit_draw: "時間到，判定平手"
   reason_bot_down: "BOT 倒下"
   reason_bot_spawn_failed: "BOT 生成失敗"
 
@@ -133,6 +134,8 @@ messages:
   duel_received: "<#FFD166><sender> 向你發起對戰</#FFD166>"
   duel_accept_button: "<#7CFF9E>[接受]"
   duel_accept_none: "<#FF6B6B>沒有待處理的對戰邀請。"
+  duel_map_locked: "<#FF6B6B><mode> 已綁定地圖，無法更換。"
+  duel_loser_leave_hint: "<#FF6B6B>你已落敗，輸入 <#FFD166><command></#FFD166> 可提前離場並還原狀態。"
   duel_expired: "<#FF6B6B>邀請已過期。"
   duel_expired_sender: "<#FF6B6B>對戰邀請已過期。"
   duel_no_arena: "<#FF6B6B>目前沒有空閒 Arena。"

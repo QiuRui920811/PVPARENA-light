@@ -51,6 +51,10 @@ public class DuelManager {
     }
 
     public void request(Player sender, Player target, String modeId) {
+        request(sender, target, modeId, null, 300);
+    }
+
+    public void request(Player sender, Player target, String modeId, String arenaId, int timeLimitSeconds) {
         if (sender.getUniqueId().equals(target.getUniqueId())) {
             MessageUtil.send(sender, "duel_not_found");
             return;
@@ -71,7 +75,8 @@ public class DuelManager {
         if (previousTarget != null) {
             pending.remove(previousTarget);
         }
-        pending.put(target.getUniqueId(), new DuelRequest(sender.getUniqueId(), modeId, System.currentTimeMillis()));
+        int normalizedTimeLimit = Math.max(60, Math.min(3600, timeLimitSeconds));
+        pending.put(target.getUniqueId(), new DuelRequest(sender.getUniqueId(), modeId, arenaId, normalizedTimeLimit, System.currentTimeMillis()));
         outgoing.put(sender.getUniqueId(), target.getUniqueId());
         MessageUtil.send(sender, "duel_sent", Placeholder.unparsed("target", target.getName()));
         Component accept = MessageUtil.message("duel_accept_button")
@@ -227,7 +232,7 @@ public class DuelManager {
             return;
         }
         Mode selectedMode = modeManager.getMode(request.modeId);
-        Arena arena = selectedMode == null ? null : arenaManager.getFreeArena(selectedMode);
+        Arena arena = resolveArenaForRequest(selectedMode, request.arenaId);
         if (arena == null) {
             MessageUtil.send(target, "duel_no_arena");
             return;
@@ -235,7 +240,25 @@ public class DuelManager {
         pending.remove(target.getUniqueId());
         outgoing.remove(request.challengerId);
         arena.setStatus(ArenaStatus.IN_GAME);
-        matchManager.startMatch(challenger.getUniqueId(), target.getUniqueId(), request.modeId, arena);
+        matchManager.startMatch(challenger.getUniqueId(), target.getUniqueId(), request.modeId, arena, request.timeLimitSeconds);
+    }
+
+    private Arena resolveArenaForRequest(Mode selectedMode, String requestedArenaId) {
+        if (selectedMode == null) {
+            return null;
+        }
+        if (requestedArenaId == null || requestedArenaId.isBlank()) {
+            return arenaManager.getFreeArena(selectedMode);
+        }
+        Arena requested = arenaManager.getArena(requestedArenaId);
+        if (requested == null || requested.getStatus() != ArenaStatus.FREE || !requested.isReady()) {
+            return null;
+        }
+        if (selectedMode.hasArenaRestriction()
+                && !selectedMode.getPreferredArenaIds().contains(requested.getId().toLowerCase())) {
+            return null;
+        }
+        return requested;
     }
 
     private void scheduleExpire(UUID targetId, UUID challengerId) {
@@ -268,11 +291,15 @@ public class DuelManager {
     private static class DuelRequest {
         private final UUID challengerId;
         private final String modeId;
+        private final String arenaId;
+        private final int timeLimitSeconds;
         private final long createdAt;
 
-        private DuelRequest(UUID challengerId, String modeId, long createdAt) {
+        private DuelRequest(UUID challengerId, String modeId, String arenaId, int timeLimitSeconds, long createdAt) {
             this.challengerId = challengerId;
             this.modeId = modeId;
+            this.arenaId = arenaId;
+            this.timeLimitSeconds = timeLimitSeconds;
             this.createdAt = createdAt;
         }
     }

@@ -50,8 +50,18 @@ public class ModeManager {
             if (icon == null) {
                 icon = Material.DIAMOND_SWORD;
             }
+            Material duelMapIcon = icon;
 
             ConfigurationSection settingsSection = modeSection.getConfigurationSection("settings");
+            if (settingsSection != null) {
+                String duelMapIconRaw = settingsSection.getString("duel-map-icon", "");
+                if (duelMapIconRaw != null && !duelMapIconRaw.isBlank()) {
+                    Material parsed = Material.matchMaterial(duelMapIconRaw.trim());
+                    if (parsed != null) {
+                        duelMapIcon = parsed;
+                    }
+                }
+            }
             double maxHealth = settingsSection != null ? settingsSection.getDouble("maxHealth", 20.0) : 20.0;
             int hunger = settingsSection != null ? settingsSection.getInt("hunger", 20) : 20;
             float saturation = settingsSection != null ? (float) settingsSection.getDouble("saturation", 5.0) : 5.0f;
@@ -91,7 +101,7 @@ public class ModeManager {
                 if (kit == null) {
                     kit = new ModeKit(new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
                 }
-                loaded.put(id.toLowerCase(), new Mode(id.toLowerCase(), displayName, lore, icon, kit, settings,
+                loaded.put(id.toLowerCase(), new Mode(id.toLowerCase(), displayName, lore, icon, duelMapIcon, kit, settings,
                         preferredArenaIds, mainMenuSlot, duelMenuSlot, usePlayerInventory, restoreBackupAfterMatch));
                 continue;
             }
@@ -116,7 +126,7 @@ public class ModeManager {
                 }
             }
             ModeKit kit = new ModeKit(items, armor, effects);
-            loaded.put(id.toLowerCase(), new Mode(id.toLowerCase(), displayName, lore, icon, kit, settings,
+                loaded.put(id.toLowerCase(), new Mode(id.toLowerCase(), displayName, lore, icon, duelMapIcon, kit, settings,
                     preferredArenaIds, mainMenuSlot, duelMenuSlot, usePlayerInventory, restoreBackupAfterMatch));
         }
 

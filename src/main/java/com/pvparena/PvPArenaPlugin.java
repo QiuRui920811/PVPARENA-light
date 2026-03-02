@@ -120,7 +120,7 @@ public class PvPArenaPlugin extends JavaPlugin {
         this.matchManager.setSpectatorManager(spectatorManager);
         this.mainMenu = new MainMenu(this, messageManager, modeManager, queueManager, settings);
         this.resultMenu = new ResultMenu(messageManager, matchManager);
-        this.duelMenu = new DuelMenu(this, messageManager, modeManager, settings);
+        this.duelMenu = new DuelMenu(messageManager, modeManager, arenaManager, settings);
         this.kitEditorMenu = new KitEditorMenu(this, kitManager);
         this.spectatorAdminMenu = new SpectatorAdminMenu(this);
         this.spectatorBrowseMenu = new SpectatorBrowseMenu(this, matchManager);

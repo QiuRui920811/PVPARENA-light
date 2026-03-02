@@ -13,9 +13,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.logging.Logger;
 
-/**
- * Downloads and loads sqlite-jdbc at runtime to keep the plugin jar slim.
- */
 public final class SQLiteDriverLoader {
     private static final String VERSION = "3.45.3.0";
     private static final String DRIVER_CLASS = "org.sqlite.JDBC";
@@ -34,9 +31,9 @@ public final class SQLiteDriverLoader {
     public void ensureDriver() {
         try {
             Class.forName(DRIVER_CLASS);
-            return; // already present
-        } catch (ClassNotFoundException ignored) {
-            // proceed to load
+            return;
+        } catch (ClassNotFoundException ex) {
+            logger.warning("sqlite-jdbc not found in classpath, trying plugins/lib auto-download...");
         }
 
         Path libsDir = plugin.getDataFolder().toPath().getParent().resolve("lib");
@@ -47,7 +44,7 @@ public final class SQLiteDriverLoader {
                 download(jarPath);
             }
             addToClasspath(jarPath.toUri().toURL());
-            Class.forName(DRIVER_CLASS); // verify load
+            Class.forName(DRIVER_CLASS);
             logger.info("Loaded sqlite-jdbc from " + jarPath.getFileName());
         } catch (Exception ex) {
             logger.severe("Failed to load sqlite driver: " + ex.getMessage());
@@ -56,7 +53,7 @@ public final class SQLiteDriverLoader {
 
     private void download(Path target) throws IOException {
         logger.info("Downloading sqlite-jdbc " + VERSION + " ...");
-        HttpURLConnection conn = (HttpURLConnection) new URL(DOWNLOAD_URL).openConnection();
+        HttpURLConnection conn = (HttpURLConnection) java.net.URI.create(DOWNLOAD_URL).toURL().openConnection();
         conn.setConnectTimeout(8000);
         conn.setReadTimeout(8000);
         conn.setRequestProperty("User-Agent", "PvPArena/1.0");
@@ -72,7 +69,6 @@ public final class SQLiteDriverLoader {
             addURL.setAccessible(true);
             addURL.invoke(cl, url);
         } else {
-            // Fallback to system loader
             ClassLoader sys = ClassLoader.getSystemClassLoader();
             if (sys instanceof URLClassLoader) {
                 Method addURL = URLClassLoader.class.getDeclaredMethod("addURL", URL.class);

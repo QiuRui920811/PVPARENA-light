@@ -45,6 +45,17 @@ public class PluginSettings {
     private int guiDuelStartSlot;
     private int guiDuelStep;
     private List<GuiDecorationItem> guiDuelDecorations;
+    private GuiControlItem guiDuelSubmitControl;
+    private GuiControlItem guiDuelModeControl;
+    private GuiControlItem guiDuelTimeControl;
+    private GuiControlItem guiDuelMapControl;
+    private GuiControlItem guiDuelMapLockedFeedbackControl;
+    private GuiControlItem guiDuelCancelControl;
+    private int guiDuelMapLockedFeedbackTicks;
+    private boolean guiDuelButtonSoundEnabled;
+    private String guiDuelButtonSound;
+    private float guiDuelButtonSoundVolume;
+    private float guiDuelButtonSoundPitch;
     private int duelRequestTimeoutSeconds;
     private int queueTimeoutSeconds;
     private int queueBotFallbackSeconds;
@@ -127,6 +138,29 @@ public class PluginSettings {
         this.guiDuelStartSlot = clampSlot(config.getInt("gui.duel.start-slot", 10), guiDuelSize);
         this.guiDuelStep = Math.max(1, config.getInt("gui.duel.step", 2));
         this.guiDuelDecorations = parseDecorations(config, "gui.duel.decorations", guiDuelSize);
+        this.guiDuelSubmitControl = parseGuiControl(config, "gui.duel.controls.submit",
+            10, "GREEN_STAINED_GLASS_PANE", "&a&lSend Invite",
+            List.of("&7Click to send duel invite"), true, guiDuelSize);
+        this.guiDuelModeControl = parseGuiControl(config, "gui.duel.controls.mode",
+            12, "DIAMOND_SWORD", "&b&lMode: &f{mode}",
+            List.of("&7Click to cycle mode", "&7Left next / Right previous"), false, guiDuelSize);
+        this.guiDuelTimeControl = parseGuiControl(config, "gui.duel.controls.time",
+            13, "CLOCK", "&e&lTime: &f{minutes} min",
+            List.of("&7Time up = draw", "&7Click to cycle duration"), false, guiDuelSize);
+        this.guiDuelMapControl = parseGuiControl(config, "gui.duel.controls.map",
+            14, "GRASS_BLOCK", "&6&lMap: &f{map}",
+            List.of("&7Click to cycle map", "&7Left next / Right previous"), false, guiDuelSize);
+        this.guiDuelMapLockedFeedbackControl = parseGuiControl(config, "gui.duel.controls.map-locked-feedback",
+            14, "BARRIER", "&c&lMap Locked",
+            List.of("&7This mode uses a bound map", "&7Cannot change map"), false, guiDuelSize);
+        this.guiDuelCancelControl = parseGuiControl(config, "gui.duel.controls.cancel",
+            16, "RED_STAINED_GLASS_PANE", "&c&lClose",
+            List.of("&7Close this menu"), false, guiDuelSize);
+        this.guiDuelMapLockedFeedbackTicks = clampInt(config.getInt("gui.duel.controls.map-locked-feedback.revert-ticks", 30), 5, 200);
+        this.guiDuelButtonSoundEnabled = config.getBoolean("gui.duel.button-sound.enabled", true);
+        this.guiDuelButtonSound = normalizeSoundKey(config.getString("gui.duel.button-sound.sound", "ui.button.click"));
+        this.guiDuelButtonSoundVolume = clampFloat(config.getDouble("gui.duel.button-sound.volume", 1.0D), 0.0f, 2.0f);
+        this.guiDuelButtonSoundPitch = clampFloat(config.getDouble("gui.duel.button-sound.pitch", 1.0D), 0.5f, 2.0f);
 
         this.duelRequestTimeoutSeconds = clampInt(config.getInt("duel.request-timeout-seconds", 60), 5, 3600);
 
@@ -314,6 +348,50 @@ public class PluginSettings {
         return guiDuelDecorations;
     }
 
+    public GuiControlItem getGuiDuelSubmitControl() {
+        return guiDuelSubmitControl;
+    }
+
+    public GuiControlItem getGuiDuelModeControl() {
+        return guiDuelModeControl;
+    }
+
+    public GuiControlItem getGuiDuelTimeControl() {
+        return guiDuelTimeControl;
+    }
+
+    public GuiControlItem getGuiDuelMapControl() {
+        return guiDuelMapControl;
+    }
+
+    public GuiControlItem getGuiDuelMapLockedFeedbackControl() {
+        return guiDuelMapLockedFeedbackControl;
+    }
+
+    public GuiControlItem getGuiDuelCancelControl() {
+        return guiDuelCancelControl;
+    }
+
+    public int getGuiDuelMapLockedFeedbackTicks() {
+        return guiDuelMapLockedFeedbackTicks;
+    }
+
+    public boolean isGuiDuelButtonSoundEnabled() {
+        return guiDuelButtonSoundEnabled;
+    }
+
+    public String getGuiDuelButtonSound() {
+        return guiDuelButtonSound;
+    }
+
+    public float getGuiDuelButtonSoundVolume() {
+        return guiDuelButtonSoundVolume;
+    }
+
+    public float getGuiDuelButtonSoundPitch() {
+        return guiDuelButtonSoundPitch;
+    }
+
     public int getDuelRequestTimeoutSeconds() {
         return duelRequestTimeoutSeconds;
     }
@@ -437,12 +515,56 @@ public class PluginSettings {
         return result;
     }
 
+    private GuiControlItem parseGuiControl(FileConfiguration config, String path,
+                                           int defaultSlot,
+                                           String defaultMaterial,
+                                           String defaultName,
+                                           List<String> defaultLore,
+                                           boolean defaultGlow,
+                                           int invSize) {
+        int slot = clampSlot(config.getInt(path + ".slot", defaultSlot), invSize);
+        String materialName = config.getString(path + ".material", defaultMaterial);
+        org.bukkit.Material material = org.bukkit.Material.matchMaterial(
+                (materialName == null ? defaultMaterial : materialName).toUpperCase(Locale.ROOT));
+        if (material == null || material.isAir()) {
+            material = org.bukkit.Material.matchMaterial(defaultMaterial);
+            if (material == null || material.isAir()) {
+                material = org.bukkit.Material.BARRIER;
+            }
+        }
+        String name = config.getString(path + ".name", defaultName);
+        List<String> lore = config.getStringList(path + ".lore");
+        if (lore == null || lore.isEmpty()) {
+            lore = new ArrayList<>(defaultLore == null ? List.of() : defaultLore);
+        }
+        boolean glow = config.getBoolean(path + ".glow", defaultGlow);
+        return new GuiControlItem(slot, material, name == null ? "" : name, lore, glow);
+    }
+
     private int clampSlot(int slot, int invSize) {
         return Math.max(0, Math.min(invSize - 1, slot));
     }
 
     private int clampInt(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private float clampFloat(double value, float min, float max) {
+        return (float) Math.max(min, Math.min(max, value));
+    }
+
+    private String normalizeSoundKey(String sound) {
+        if (sound == null) {
+            return null;
+        }
+        String value = sound.trim().toLowerCase(Locale.ROOT);
+        if (value.isEmpty() || "none".equals(value) || "off".equals(value) || "disabled".equals(value)) {
+            return null;
+        }
+        if (!value.contains(":")) {
+            value = "minecraft:" + value;
+        }
+        return value;
     }
 
     public static class GuiDecorationItem {
@@ -453,6 +575,42 @@ public class PluginSettings {
         private final boolean glow;
 
         public GuiDecorationItem(int slot, org.bukkit.Material material, String name, List<String> lore, boolean glow) {
+            this.slot = slot;
+            this.material = material;
+            this.name = name;
+            this.lore = lore == null ? List.of() : lore;
+            this.glow = glow;
+        }
+
+        public int getSlot() {
+            return slot;
+        }
+
+        public org.bukkit.Material getMaterial() {
+            return material;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public List<String> getLore() {
+            return lore;
+        }
+
+        public boolean isGlow() {
+            return glow;
+        }
+    }
+
+    public static class GuiControlItem {
+        private final int slot;
+        private final org.bukkit.Material material;
+        private final String name;
+        private final List<String> lore;
+        private final boolean glow;
+
+        public GuiControlItem(int slot, org.bukkit.Material material, String name, List<String> lore, boolean glow) {
             this.slot = slot;
             this.material = material;
             this.name = name;

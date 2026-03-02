@@ -5,11 +5,10 @@ import com.pvparena.manager.ModeManager;
 import com.pvparena.manager.QueueManager;
 import com.pvparena.model.Mode;
 import com.pvparena.config.PluginSettings;
+import com.pvparena.util.GuiTextUtil;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
-import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -86,16 +85,14 @@ public class MainMenu {
         for (Mode mode : modeManager.getModes().values()) {
             ItemStack icon = new ItemStack(mode.getIcon() != null ? mode.getIcon() : Material.DIAMOND_SWORD);
             ItemMeta meta = icon.getItemMeta();
-            meta.displayName(Component.text(mode.getDisplayName(), NamedTextColor.AQUA)
-                    .decoration(TextDecoration.ITALIC, TextDecoration.State.FALSE));
+            meta.displayName(GuiTextUtil.noItalic(GuiTextUtil.deserialize(mode.getDisplayName())));
             meta.setLocalizedName(mode.getId());
             meta.getPersistentDataContainer().set(modeKey, PersistentDataType.STRING, mode.getId());
             List<Component> lore = new ArrayList<>();
                 lore.add(messageManager.getUi("main_menu_queue_count",
                     Placeholder.unparsed("count", String.valueOf(queueManager.getQueueSize(mode.getId())))));
             for (String line : mode.getLore()) {
-                lore.add(LegacyComponentSerializer.legacySection().deserialize(line)
-                        .decoration(TextDecoration.ITALIC, TextDecoration.State.FALSE));
+                lore.add(GuiTextUtil.noItalic(GuiTextUtil.deserialize(line)));
             }
             meta.lore(lore);
             icon.setItemMeta(meta);
@@ -141,13 +138,11 @@ public class MainMenu {
                 continue;
             }
             if (def.getName() != null && !def.getName().isBlank()) {
-                meta.displayName(LegacyComponentSerializer.legacySection().deserialize(def.getName())
-                        .decoration(TextDecoration.ITALIC, TextDecoration.State.FALSE));
+                meta.displayName(GuiTextUtil.noItalic(GuiTextUtil.deserialize(def.getName())));
             }
             List<Component> lore = new ArrayList<>();
             for (String line : def.getLore()) {
-                lore.add(LegacyComponentSerializer.legacySection().deserialize(line)
-                        .decoration(TextDecoration.ITALIC, TextDecoration.State.FALSE));
+                lore.add(GuiTextUtil.noItalic(GuiTextUtil.deserialize(line)));
             }
             if (!lore.isEmpty()) {
                 meta.lore(lore);

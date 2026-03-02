@@ -22,7 +22,29 @@ jobs:
           cache: maven
 
       - name: Build
-        run: mvn -B -DskipTests package
+        run: mvn -B -DskipTests clean package
+
+      - name: Verify thin jar
+        run: |
+          JAR=$(ls -1 target/pvparena-light-*.jar | head -n 1)
+          if [ -z "$JAR" ]; then
+            echo "No build jar found in target/"
+            exit 1
+          fi
+
+          SIZE=$(stat -c%s "$JAR")
+          echo "Built jar: $JAR"
+          echo "Jar size (bytes): $SIZE"
+
+          if [ "$SIZE" -gt 2097152 ]; then
+            echo "Jar is too large (>2MB). This usually means dependencies were bundled."
+            exit 1
+          fi
+
+          if jar tf "$JAR" | grep -q '^org/sqlite/'; then
+            echo "Detected shaded dependency content (org/sqlite/*). Thin jar required."
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

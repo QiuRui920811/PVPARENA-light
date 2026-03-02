@@ -1,6 +1,7 @@
 package com.pvparena.model;
 
 import org.bukkit.Location;
+import org.bukkit.Material;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -13,6 +14,7 @@ public class Arena {
     private Location spawn2;
     private Location minBound;
     private Location maxBound;
+    private Material duelMapIcon;
     private ArenaStatus status;
     private final Map<String, ArenaDoor> doors = new LinkedHashMap<>();
 
@@ -63,6 +65,14 @@ public class Arena {
 
     public void setMaxBound(Location maxBound) {
         this.maxBound = maxBound;
+    }
+
+    public Material getDuelMapIcon() {
+        return duelMapIcon;
+    }
+
+    public void setDuelMapIcon(Material duelMapIcon) {
+        this.duelMapIcon = duelMapIcon;
     }
 
     public ArenaStatus getStatus() {

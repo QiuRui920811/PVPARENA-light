@@ -15,7 +15,7 @@ public class DuelTabCompleter implements TabCompleter {
         if (args.length == 1) {
             addIfMatch(result, args[0], "accept");
             addIfMatch(result, args[0], "cancel");
-            addIfMatch(result, args[0], "leave");
+            addIfMatch(result, args[0], "dleave");
             addIfMatch(result, args[0], "result");
             Bukkit.getOnlinePlayers().forEach(p -> addIfMatch(result, args[0], p.getName()));
             return result;

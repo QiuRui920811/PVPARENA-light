@@ -19,14 +19,43 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 public class MatchCrashRecoveryManager {
     private final JavaPlugin plugin;
+    private final ExecutorService dbExecutor;
     private Connection connection;
 
     public MatchCrashRecoveryManager(JavaPlugin plugin) {
         this.plugin = plugin;
+        this.dbExecutor = createDbExecutor();
         init();
+    }
+
+    private ExecutorService createDbExecutor() {
+        ThreadFactory threadFactory = runnable -> {
+            Thread thread = new Thread(runnable, "pvparena-light-crash-recovery-db");
+            thread.setDaemon(true);
+            return thread;
+        };
+        return Executors.newSingleThreadExecutor(threadFactory);
+    }
+
+    private void submitDbTask(Runnable runnable) {
+        if (runnable == null || dbExecutor.isShutdown()) {
+            return;
+        }
+        dbExecutor.execute(() -> {
+            try {
+                runnable.run();
+            } catch (Throwable ex) {
+                plugin.getLogger().warning("Crash recovery DB task failed: " + ex.getMessage());
+            }
+        });
     }
 
     private void init() {
@@ -80,6 +109,11 @@ public class MatchCrashRecoveryManager {
 
     public void registerActiveMatch(String sessionId, UUID playerA, UUID playerB, String modeId, String arenaId,
                                     int currentRound, int roundsWonA, int roundsWonB) {
+        submitDbTask(() -> registerActiveMatchBlocking(sessionId, playerA, playerB, modeId, arenaId, currentRound, roundsWonA, roundsWonB));
+    }
+
+    private void registerActiveMatchBlocking(String sessionId, UUID playerA, UUID playerB, String modeId, String arenaId,
+                                             int currentRound, int roundsWonA, int roundsWonB) {
         if (connection == null || sessionId == null || playerA == null || playerB == null || modeId == null || arenaId == null) {
             return;
         }
@@ -101,6 +135,10 @@ public class MatchCrashRecoveryManager {
     }
 
     public void updateActiveMatchProgress(String sessionId, int currentRound, int roundsWonA, int roundsWonB) {
+        submitDbTask(() -> updateActiveMatchProgressBlocking(sessionId, currentRound, roundsWonA, roundsWonB));
+    }
+
+    private void updateActiveMatchProgressBlocking(String sessionId, int currentRound, int roundsWonA, int roundsWonB) {
         if (connection == null || sessionId == null) {
             return;
         }
@@ -117,6 +155,10 @@ public class MatchCrashRecoveryManager {
     }
 
     public void removeActiveMatch(String sessionId) {
+        submitDbTask(() -> removeActiveMatchBlocking(sessionId));
+    }
+
+    private void removeActiveMatchBlocking(String sessionId) {
         if (connection == null || sessionId == null) {
             return;
         }
@@ -129,6 +171,20 @@ public class MatchCrashRecoveryManager {
     }
 
     public List<RecoveredMatch> loadActiveMatches() {
+        return loadActiveMatchesBlocking();
+    }
+
+    public void loadActiveMatchesAsync(Consumer<List<RecoveredMatch>> callback) {
+        if (callback == null) {
+            return;
+        }
+        submitDbTask(() -> {
+            List<RecoveredMatch> recovered = loadActiveMatchesBlocking();
+            plugin.getServer().getGlobalRegionScheduler().run(plugin, task -> callback.accept(recovered));
+        });
+    }
+
+    private List<RecoveredMatch> loadActiveMatchesBlocking() {
         List<RecoveredMatch> out = new ArrayList<>();
         if (connection == null) {
             return out;
@@ -157,6 +213,10 @@ public class MatchCrashRecoveryManager {
     }
 
     public void recordRollbackBlock(String sessionId, Location location, BlockData blockData) {
+        submitDbTask(() -> recordRollbackBlockBlocking(sessionId, location, blockData));
+    }
+
+    private void recordRollbackBlockBlocking(String sessionId, Location location, BlockData blockData) {
         if (connection == null || sessionId == null || location == null || location.getWorld() == null || blockData == null) {
             return;
         }
@@ -175,6 +235,10 @@ public class MatchCrashRecoveryManager {
     }
 
     public void clearRollbackBlocks(String sessionId) {
+        submitDbTask(() -> clearRollbackBlocksBlocking(sessionId));
+    }
+
+    private void clearRollbackBlocksBlocking(String sessionId) {
         if (connection == null || sessionId == null) {
             return;
         }
@@ -187,19 +251,29 @@ public class MatchCrashRecoveryManager {
     }
 
     public void recoverPendingRollbacksAsync() {
-        List<RollbackBlock> all = loadRollbackBlocks();
-        if (all.isEmpty()) {
-            return;
-        }
-
-        Set<String> activeSessionIds = loadActiveSessionIds();
-        List<RollbackBlock> orphaned = new ArrayList<>();
-        for (RollbackBlock block : all) {
-            if (!activeSessionIds.contains(block.sessionId())) {
-                orphaned.add(block);
+        submitDbTask(() -> {
+            List<RollbackBlock> all = loadRollbackBlocksBlocking();
+            if (all.isEmpty()) {
+                return;
             }
-        }
-        if (orphaned.isEmpty()) {
+
+            Set<String> activeSessionIds = loadActiveSessionIdsBlocking();
+            List<RollbackBlock> orphaned = new ArrayList<>();
+            for (RollbackBlock block : all) {
+                if (!activeSessionIds.contains(block.sessionId())) {
+                    orphaned.add(block);
+                }
+            }
+            if (orphaned.isEmpty()) {
+                return;
+            }
+
+            plugin.getServer().getGlobalRegionScheduler().run(plugin, task -> scheduleRollbackRecovery(orphaned));
+        });
+    }
+
+    private void scheduleRollbackRecovery(List<RollbackBlock> orphaned) {
+        if (orphaned == null || orphaned.isEmpty()) {
             return;
         }
 
@@ -246,12 +320,12 @@ public class MatchCrashRecoveryManager {
                 plugin.getLogger().warning("Crash rollback recovery completed with errors: " + ex.getMessage());
             }
             if (!recoveredSessionIds.isEmpty()) {
-                clearRollbackBlocksForSessions(recoveredSessionIds);
+                clearRollbackBlocksForSessionsAsync(recoveredSessionIds);
             }
         });
     }
 
-    private Set<String> loadActiveSessionIds() {
+    private Set<String> loadActiveSessionIdsBlocking() {
         Set<String> out = new HashSet<>();
         if (connection == null) {
             return out;
@@ -295,7 +369,7 @@ public class MatchCrashRecoveryManager {
                 task -> applyChunkRollback(world, blocks, end, blocksPerTick, done), 1L);
     }
 
-    private List<RollbackBlock> loadRollbackBlocks() {
+    private List<RollbackBlock> loadRollbackBlocksBlocking() {
         List<RollbackBlock> out = new ArrayList<>();
         if (connection == null) {
             return out;
@@ -318,7 +392,11 @@ public class MatchCrashRecoveryManager {
         return out;
     }
 
-    private void clearRollbackBlocksForSessions(Set<String> sessionIds) {
+    private void clearRollbackBlocksForSessionsAsync(Set<String> sessionIds) {
+        submitDbTask(() -> clearRollbackBlocksForSessionsBlocking(sessionIds));
+    }
+
+    private void clearRollbackBlocksForSessionsBlocking(Set<String> sessionIds) {
         if (connection == null || sessionIds == null || sessionIds.isEmpty()) {
             return;
         }
@@ -333,6 +411,21 @@ public class MatchCrashRecoveryManager {
     }
 
     public void close() {
+        if (!dbExecutor.isShutdown()) {
+            dbExecutor.execute(this::closeConnectionBlocking);
+            dbExecutor.shutdown();
+            try {
+                if (!dbExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    dbExecutor.shutdownNow();
+                }
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                dbExecutor.shutdownNow();
+            }
+        }
+    }
+
+    private void closeConnectionBlocking() {
         try {
             if (connection != null && !connection.isClosed()) {
                 connection.close();

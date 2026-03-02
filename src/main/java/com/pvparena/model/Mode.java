@@ -12,6 +12,7 @@ public class Mode {
     private final String displayName;
     private final List<String> lore;
     private final Material icon;
+    private final Material duelMapIcon;
     private final ModeKit kit;
     private final ModeSettings settings;
     private final Set<String> preferredArenaIds;
@@ -20,7 +21,7 @@ public class Mode {
     private final boolean usePlayerInventory;
     private final boolean restoreBackupAfterMatch;
 
-    public Mode(String id, String displayName, List<String> lore, Material icon, ModeKit kit,
+    public Mode(String id, String displayName, List<String> lore, Material icon, Material duelMapIcon, ModeKit kit,
                 ModeSettings settings, Set<String> preferredArenaIds,
                 Integer mainMenuSlot, Integer duelMenuSlot,
                 boolean usePlayerInventory, boolean restoreBackupAfterMatch) {
@@ -28,6 +29,7 @@ public class Mode {
         this.displayName = displayName;
         this.lore = lore;
         this.icon = icon;
+        this.duelMapIcon = duelMapIcon != null ? duelMapIcon : icon;
         this.kit = kit;
         this.settings = settings;
         this.mainMenuSlot = mainMenuSlot;
@@ -55,6 +57,10 @@ public class Mode {
 
     public Material getIcon() {
         return icon;
+    }
+
+    public Material getDuelMapIcon() {
+        return duelMapIcon;
     }
 
     public ModeKit getKit() {

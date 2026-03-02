@@ -8,6 +8,7 @@ import com.pvparena.model.Mode;
 import com.pvparena.util.LocationUtil;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
 import org.bukkit.configuration.ConfigurationSection;
@@ -47,6 +48,13 @@ public class ArenaManager {
             arena.setSpawn2(LocationUtil.deserialize(arenaSection.getConfigurationSection("spawn2")));
             arena.setMinBound(LocationUtil.deserialize(arenaSection.getConfigurationSection("bounds.min")));
             arena.setMaxBound(LocationUtil.deserialize(arenaSection.getConfigurationSection("bounds.max")));
+            String duelMapIconRaw = arenaSection.getString("duel-map-icon", "");
+            if (duelMapIconRaw != null && !duelMapIconRaw.isBlank()) {
+                Material duelMapIcon = Material.matchMaterial(duelMapIconRaw.trim());
+                if (duelMapIcon != null && !duelMapIcon.isAir()) {
+                    arena.setDuelMapIcon(duelMapIcon);
+                }
+            }
             ConfigurationSection doorsSection = arenaSection.getConfigurationSection("doors");
             if (doorsSection != null) {
                 for (String doorId : doorsSection.getKeys(false)) {
@@ -159,6 +167,11 @@ public class ArenaManager {
         }
         if (arena.getMaxBound() != null) {
             arenaSection.createSection("bounds.max", LocationUtil.serialize(arena.getMaxBound()));
+        }
+        if (arena.getDuelMapIcon() != null && !arena.getDuelMapIcon().isAir()) {
+            arenaSection.set("duel-map-icon", arena.getDuelMapIcon().name());
+        } else {
+            arenaSection.set("duel-map-icon", null);
         }
         arenaSection.set("doors", null);
         ConfigurationSection doorsSection = arenaSection.createSection("doors");

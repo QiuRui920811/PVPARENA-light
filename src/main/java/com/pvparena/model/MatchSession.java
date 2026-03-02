@@ -82,7 +82,10 @@ public class MatchSession {
     private final Map<UUID, String> lastDuelTabHeaders = new HashMap<>();
     private final Map<UUID, String> lastDuelTabFooters = new HashMap<>();
     private io.papermc.paper.threadedregions.scheduler.ScheduledTask hudTask;
+    private io.papermc.paper.threadedregions.scheduler.ScheduledTask duelTimeLimitTask;
+    private volatile int duelTimeLimitSeconds = 0;
     private long hudTickCounter = 0L;
+    private volatile boolean roundSidebarAvailable = true;
     private volatile boolean roundResolving = false;
     private volatile int lastResolvedRound = 0;
     private volatile int resolvingRound = 0;
@@ -123,6 +126,10 @@ public class MatchSession {
         this.roundsWonA = Math.max(0, recoveredRoundsWonA);
         this.roundsWonB = Math.max(0, recoveredRoundsWonB);
         this.resumedFromRecovery = true;
+    }
+
+    public void setDuelTimeLimitSeconds(int duelTimeLimitSeconds) {
+        this.duelTimeLimitSeconds = Math.max(0, duelTimeLimitSeconds);
     }
 
     public PlayerSnapshot getSnapshot(UUID playerId) {
@@ -224,7 +231,7 @@ public class MatchSession {
         }
         int nextA = roundsWonA + (winnerId.equals(playerA) ? 1 : 0);
         int nextB = roundsWonB + (winnerId.equals(playerB) ? 1 : 0);
-        int target = Math.max(1, mode.getSettings().getRoundsToWin());
+        int target = getTargetRoundsToWin();
         return nextA >= target || nextB >= target;
     }
 
@@ -234,6 +241,13 @@ public class MatchSession {
 
     public boolean isDropInventoryMode() {
         return mode.isUsePlayerInventory() && !mode.isRestoreBackupAfterMatch();
+    }
+
+    private int getTargetRoundsToWin() {
+        if (isDropInventoryMode()) {
+            return 1;
+        }
+        return Math.max(1, mode.getSettings().getRoundsToWin());
     }
 
     public void onPlayerDefeated(Player defeated, String reason) {
@@ -274,7 +288,7 @@ public class MatchSession {
         updateRoundScoreboard();
         updateRoundBossBar();
 
-        int target = Math.max(1, mode.getSettings().getRoundsToWin());
+        int target = getTargetRoundsToWin();
         if (roundsWonA >= target || roundsWonB >= target) {
             matchManager.updateRecoveryProgress(recoverySessionId, currentRound, roundsWonA, roundsWonB);
             if (mode.getSettings().isEliminatedCanSpectate()) {
@@ -838,6 +852,7 @@ public class MatchSession {
         roundResolving = false;
         resolvingRound = 0;
         state = MatchState.FIGHTING;
+        scheduleDuelTimeLimitIfNeeded();
         applyDuelPlayerListIsolation(p1, p2);
         matchManager.getPkManager().forceEnable(playerA);
         matchManager.getPkManager().forceEnable(playerB);
@@ -1167,6 +1182,10 @@ public class MatchSession {
     public void end(UUID winner, String reason) {
         roundResolving = false;
         state = MatchState.ENDING;
+        if (duelTimeLimitTask != null) {
+            duelTimeLimitTask.cancel();
+            duelTimeLimitTask = null;
+        }
         matchManager.clearEliminatedSpectator(playerA);
         matchManager.clearEliminatedSpectator(playerB);
         debugRestore("end winner=" + winner + " reason=" + reason + " p1=" + playerA + " p2=" + playerB);
@@ -1191,6 +1210,41 @@ public class MatchSession {
         if (p2 != null) {
             handleEndForPlayer(p2, winner, reason, p2.isDead());
         }
+    }
+
+    private void scheduleDuelTimeLimitIfNeeded() {
+        if (duelTimeLimitSeconds <= 0 || duelTimeLimitTask != null || currentRound > 1) {
+            return;
+        }
+        long delay = Math.max(20L, duelTimeLimitSeconds * 20L);
+        duelTimeLimitTask = plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task -> {
+            duelTimeLimitTask = null;
+            if (state == MatchState.ENDING) {
+                return;
+            }
+            Player p1 = plugin.getServer().getPlayer(playerA);
+            Player p2 = plugin.getServer().getPlayer(playerB);
+            if (p1 == null || p2 == null || !p1.isOnline() || !p2.isOnline()) {
+                return;
+            }
+            matchManager.endMatch(this, null, MatchManager.REASON_TIME_LIMIT_DRAW);
+        }, delay);
+    }
+
+    public void endSinglePlayer(UUID playerId, UUID winner, String reason) {
+        if (playerId == null) {
+            return;
+        }
+        matchManager.clearEliminatedSpectator(playerId);
+        Player player = plugin.getServer().getPlayer(playerId);
+        if (player == null || !player.isOnline()) {
+            PlayerSnapshot snapshot = playerId.equals(playerA) ? snapshotA : snapshotB;
+            if (snapshot != null) {
+                matchManager.addPendingSnapshot(playerId, snapshot);
+            }
+            return;
+        }
+        handleEndForPlayer(player, winner, reason, player.isDead());
     }
 
     private void handleEndForPlayer(Player player, UUID winner, String reason, boolean wasDeadAtEnd) {
@@ -1372,7 +1426,7 @@ public class MatchSession {
     private void sendRoundStartMessage(Player player, Player opponent) {
         MessageUtil.send(player, "round_start",
                 Placeholder.unparsed("round", String.valueOf(currentRound)),
-                Placeholder.unparsed("rounds_to_win", String.valueOf(mode.getSettings().getRoundsToWin())),
+            Placeholder.unparsed("rounds_to_win", String.valueOf(getTargetRoundsToWin())),
                 Placeholder.unparsed("your_score", String.valueOf(getRoundsWon(player.getUniqueId()))),
                 Placeholder.unparsed("opponent_score", String.valueOf(getRoundsWon(opponent.getUniqueId()))));
     }
@@ -1382,7 +1436,7 @@ public class MatchSession {
         UUID opponentId = getOpponent(playerId);
         MessageUtil.send(player, winRound ? "round_win" : "round_lose",
                 Placeholder.unparsed("round", String.valueOf(currentRound)),
-                Placeholder.unparsed("rounds_to_win", String.valueOf(mode.getSettings().getRoundsToWin())),
+            Placeholder.unparsed("rounds_to_win", String.valueOf(getTargetRoundsToWin())),
                 Placeholder.unparsed("your_score", String.valueOf(getRoundsWon(playerId))),
                 Placeholder.unparsed("opponent_score", String.valueOf(getRoundsWon(opponentId))));
 
@@ -1412,14 +1466,14 @@ public class MatchSession {
         if (p1 != null) {
             MessageUtil.send(p1, "round_next",
                     Placeholder.unparsed("round", String.valueOf(currentRound)),
-                    Placeholder.unparsed("rounds_to_win", String.valueOf(mode.getSettings().getRoundsToWin())),
+                    Placeholder.unparsed("rounds_to_win", String.valueOf(getTargetRoundsToWin())),
                     Placeholder.unparsed("your_score", String.valueOf(getRoundsWon(playerA))),
                     Placeholder.unparsed("opponent_score", String.valueOf(getRoundsWon(playerB))));
         }
         if (p2 != null) {
             MessageUtil.send(p2, "round_next",
                     Placeholder.unparsed("round", String.valueOf(currentRound)),
-                    Placeholder.unparsed("rounds_to_win", String.valueOf(mode.getSettings().getRoundsToWin())),
+                    Placeholder.unparsed("rounds_to_win", String.valueOf(getTargetRoundsToWin())),
                     Placeholder.unparsed("your_score", String.valueOf(getRoundsWon(playerB))),
                     Placeholder.unparsed("opponent_score", String.valueOf(getRoundsWon(playerA))));
         }
@@ -1663,7 +1717,7 @@ public class MatchSession {
     }
 
     private BossBar applyRoundBossBar(BossBar bar, Player viewer, Player opponent) {
-        int target = Math.max(1, mode.getSettings().getRoundsToWin());
+        int target = getTargetRoundsToWin();
         int yourScore = getRoundsWon(viewer.getUniqueId());
         int opponentScore = opponent != null ? getRoundsWon(opponent.getUniqueId()) : 0;
         String opponentName = opponent != null ? opponent.getName() : "-";
@@ -1737,7 +1791,7 @@ public class MatchSession {
     private void updateRoundScoreboard() {
         Player p1 = plugin.getServer().getPlayer(playerA);
         Player p2 = plugin.getServer().getPlayer(playerB);
-        if (!isRoundScoreboardEnabled()) {
+        if (!isRoundScoreboardEnabled() || !roundSidebarAvailable) {
             clearRoundBoards();
             if (isRoundActionbarFallbackEnabled()) {
                 sendRoundActionbar(p1, p2);
@@ -1753,34 +1807,50 @@ public class MatchSession {
         if (viewer == null || !viewer.isOnline()) {
             return;
         }
+        if (!roundSidebarAvailable) {
+            return;
+        }
         SchedulerUtil.runOnPlayer(plugin, viewer, () -> {
             if (!viewer.isOnline() || !isRoundScoreboardEnabled()) {
                 deleteRoundSidebar(viewer.getUniqueId());
                 return;
             }
 
-            FastBoard board = roundSideboards.get(viewer.getUniqueId());
-            if (board == null) {
-                board = new FastBoard(viewer);
-                roundSideboards.put(viewer.getUniqueId(), board);
-            }
+            try {
+                FastBoard board = roundSideboards.get(viewer.getUniqueId());
+                if (board == null) {
+                    board = new FastBoard(viewer);
+                    roundSideboards.put(viewer.getUniqueId(), board);
+                }
 
-            String nextTitle = renderRoundText(viewer, opponent,
-                    plugin.getConfig().getString("round-scoreboard.title", "&b&lPvPArena"));
-            List<String> nextLines = buildRoundScoreboardLines(viewer, opponent);
+                String nextTitle = renderRoundText(viewer, opponent,
+                        plugin.getConfig().getString("round-scoreboard.title", "&b&lPvPArena"));
+                List<String> nextLines = buildRoundScoreboardLines(viewer, opponent);
 
-            UUID viewerId = viewer.getUniqueId();
-            String lastTitle = lastRoundBoardTitles.get(viewerId);
-            List<String> lastLines = lastRoundBoardLines.get(viewerId);
-            if (!nextTitle.equals(lastTitle)) {
-                board.updateTitle(nextTitle);
-                lastRoundBoardTitles.put(viewerId, nextTitle);
-            }
-            if (!nextLines.equals(lastLines)) {
-                board.updateLines(nextLines);
-                lastRoundBoardLines.put(viewerId, new ArrayList<>(nextLines));
+                UUID viewerId = viewer.getUniqueId();
+                String lastTitle = lastRoundBoardTitles.get(viewerId);
+                List<String> lastLines = lastRoundBoardLines.get(viewerId);
+                if (!nextTitle.equals(lastTitle)) {
+                    board.updateTitle(nextTitle);
+                    lastRoundBoardTitles.put(viewerId, nextTitle);
+                }
+                if (!nextLines.equals(lastLines)) {
+                    board.updateLines(nextLines);
+                    lastRoundBoardLines.put(viewerId, new ArrayList<>(nextLines));
+                }
+            } catch (Throwable throwable) {
+                disableRoundSidebar(throwable);
             }
         });
+    }
+
+    private void disableRoundSidebar(Throwable throwable) {
+        if (!roundSidebarAvailable) {
+            return;
+        }
+        roundSidebarAvailable = false;
+        plugin.getLogger().warning("Round sidebar disabled because FastBoard is unavailable: "
+                + throwable.getClass().getSimpleName() + " - " + throwable.getMessage());
     }
 
     private List<String> buildRoundScoreboardLines(Player viewer, Player opponent) {
@@ -1829,7 +1899,7 @@ public class MatchSession {
 
     private Map<String, String> buildRoundVariables(Player viewer, Player opponent) {
         Map<String, String> variables = new HashMap<>();
-        int targetRounds = Math.max(1, mode.getSettings().getRoundsToWin());
+        int targetRounds = getTargetRoundsToWin();
         int yourScore = getRoundsWon(viewer.getUniqueId());
         int opponentScore = opponent != null ? getRoundsWon(opponent.getUniqueId()) : 0;
         double yourHealth = Math.ceil(Math.max(0.0, viewer.getHealth()));
@@ -2096,8 +2166,8 @@ public class MatchSession {
         int opponentScore = opponent != null ? getRoundsWon(opponent.getUniqueId()) : 0;
         String text = MessageUtil.getPlainMessage("round_scoreboard_title",
                 Placeholder.unparsed("round", String.valueOf(currentRound)),
-                Placeholder.unparsed("rounds_to_win", String.valueOf(mode.getSettings().getRoundsToWin())))
-                + " | " + yourScore + "-" + opponentScore + " | BO" + mode.getSettings().getRoundsToWin();
+            Placeholder.unparsed("rounds_to_win", String.valueOf(getTargetRoundsToWin())))
+            + " | " + yourScore + "-" + opponentScore + " | BO" + getTargetRoundsToWin();
         viewer.sendActionBar(Component.text(text));
     }
 

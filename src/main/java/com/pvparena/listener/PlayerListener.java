@@ -599,7 +599,7 @@ public class PlayerListener implements Listener {
             root = root.substring(namespaced + 1);
         }
         String sub = parts[1].toLowerCase(Locale.ROOT);
-        return "duel".equals(root) && "leave".equals(sub);
+        return "duel".equals(root) && ("dleave".equals(sub) || "leave".equals(sub));
     }
 
 }

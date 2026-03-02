@@ -13,6 +13,9 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.SoundCategory;
 import org.bukkit.World;
 import org.bukkit.entity.AbstractArrow;
 import org.bukkit.entity.EnderCrystal;
@@ -22,12 +25,15 @@ import org.bukkit.entity.Item;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Trident;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Iterator;
+import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -35,6 +41,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class MatchManager {
     public static final String REASON_PLAYER_DEATH = "reason_player_death";
     public static final String REASON_PLAYER_OFFLINE = "reason_player_offline";
+    public static final String REASON_TIME_LIMIT_DRAW = "reason_time_limit_draw";
     public static final String REASON_ARENA_SPAWN_UNSET = "reason_arena_spawn_unset";
     public static final String REASON_TELEPORT_FAILED = "reason_teleport_failed";
     public static final String REASON_BOT_DOWN = "reason_bot_down";
@@ -63,6 +70,7 @@ public class MatchManager {
     private final Map<UUID, Long> externalSyncBlockedUntil = new ConcurrentHashMap<>();
     private final Map<String, MatchCrashRecoveryManager.RecoveredMatch> pendingRecoveredMatches = new ConcurrentHashMap<>();
     private final Map<String, PendingWinnerLeave> pendingWinnerLeaves = new ConcurrentHashMap<>();
+    private final Map<String, Set<UUID>> lootPhaseEarlyLeavers = new ConcurrentHashMap<>();
     private static final long BACK_BLOCK_MILLIS = 60_000L;
 
     public MatchManager(JavaPlugin plugin, ArenaManager arenaManager, QueueManager queueManager, ModeManager modeManager,
@@ -83,13 +91,15 @@ public class MatchManager {
             return;
         }
         crashRecoveryManager.recoverPendingRollbacksAsync();
-        List<MatchCrashRecoveryManager.RecoveredMatch> recovered = crashRecoveryManager.loadActiveMatches();
-        if (!recovered.isEmpty()) {
+        crashRecoveryManager.loadActiveMatchesAsync(recovered -> {
+            if (recovered == null || recovered.isEmpty()) {
+                return;
+            }
             for (MatchCrashRecoveryManager.RecoveredMatch match : recovered) {
                 pendingRecoveredMatches.put(match.sessionId(), match);
             }
             plugin.getLogger().info("Loaded " + recovered.size() + " unfinished match(es) for crash recovery.");
-        }
+        });
         plugin.getServer().getGlobalRegionScheduler().runAtFixedRate(plugin, task -> tryResumeRecoveredMatches(), 40L, 60L);
         plugin.getServer().getGlobalRegionScheduler().runAtFixedRate(plugin, task -> {
             if (crashRecoveryManager != null) {
@@ -214,6 +224,10 @@ public class MatchManager {
     }
 
     public void startMatch(UUID p1, UUID p2, String modeId, Arena arena) {
+        startMatch(p1, p2, modeId, arena, 0);
+    }
+
+    public void startMatch(UUID p1, UUID p2, String modeId, Arena arena, int duelTimeLimitSeconds) {
         Player player1 = plugin.getServer().getPlayer(p1);
         Player player2 = plugin.getServer().getPlayer(p2);
         if (player1 == null || player2 == null) {
@@ -234,6 +248,7 @@ public class MatchManager {
                 + " p1=" + player1.getName()
                 + " p2=" + player2.getName());
         MatchSession session = new MatchSession(plugin, this, p1, p2, mode, arena);
+        session.setDuelTimeLimitSeconds(duelTimeLimitSeconds);
         if (crashRecoveryManager != null) {
             crashRecoveryManager.registerActiveMatch(session.getRecoverySessionId(), p1, p2, modeId, arena.getId());
         }
@@ -398,10 +413,18 @@ public class MatchManager {
         if (winner != null && session != null && session.getMode() != null && session.getMode().getSettings() != null) {
             winnerLeaveDelay = Math.max(0, session.getMode().getSettings().getWinnerLeaveDelaySeconds());
         }
+        if (winner != null && REASON_PLAYER_OFFLINE.equals(reason)) {
+            winnerLeaveDelay = Math.max(1, winnerLeaveDelay);
+        }
         if (winner != null && winnerLeaveDelay > 0 && session.beginWinnerLeaveCountdown()) {
             String sessionId = session.getRecoverySessionId();
             UUID loser = session.getOpponent(winner);
+            String soundKey = getWinnerLeaveWaitSoundKey();
+            float soundVolume = getWinnerLeaveWaitSoundVolume();
+            float soundPitch = getWinnerLeaveWaitSoundPitch();
             prepareWinnerLootPhase(winner, loser);
+            playWinnerLeaveWaitSound(winner, soundKey, soundVolume, soundPitch);
+            playWinnerLeaveWaitSound(loser, soundKey, soundVolume, soundPitch);
             UUID winnerId = winner;
             UUID loserId = loser;
             AtomicInteger remain = new AtomicInteger(winnerLeaveDelay);
@@ -411,17 +434,19 @@ public class MatchManager {
                 if (sec <= 0) {
                     task.cancel();
                     pendingWinnerLeaves.remove(sessionId);
+                    stopWinnerLeaveWaitSound(winnerId, soundKey);
+                    stopWinnerLeaveWaitSound(loserId, soundKey);
                     finalizeEndMatch(session, winner, reason, quitterId);
                     return;
                 }
-                enforceWinnerLootPhaseState(winnerId, loserId);
+                enforceWinnerLootPhaseState(sessionId, winnerId, loserId);
                 if (winnerPlayer != null && winnerPlayer.isOnline()) {
                     SchedulerUtil.runOnPlayer(plugin, winnerPlayer, () -> winnerPlayer.sendActionBar(
                             MessageUtil.message("winner_leave_countdown",
                                     net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed("seconds", String.valueOf(sec)))));
                 }
             }, 1L, 20L);
-            pendingWinnerLeaves.put(sessionId, new PendingWinnerLeave(winnerId, reason, quitterId, countdownTask));
+            pendingWinnerLeaves.put(sessionId, new PendingWinnerLeave(winnerId, loserId, reason, quitterId, countdownTask, soundKey));
             return;
         }
         finalizeEndMatch(session, winner, reason, quitterId);
@@ -441,12 +466,52 @@ public class MatchManager {
             return false;
         }
 
-        pendingWinnerLeaves.remove(sessionId);
-        if (pending.task() != null) {
-            pending.task().cancel();
+        UUID playerId = player.getUniqueId();
+        UUID winnerId = pending.winnerId();
+        UUID loserId = session.getOpponent(winnerId);
+
+        if (winnerId != null && winnerId.equals(playerId)) {
+            pendingWinnerLeaves.remove(sessionId);
+            if (pending.task() != null) {
+                pending.task().cancel();
+            }
+            stopWinnerLeaveWaitSound(winnerId, pending.soundKey());
+            stopWinnerLeaveWaitSound(pending.loserId(), pending.soundKey());
+            finalizeEndMatch(session, pending.winnerId(), pending.reason(), pending.quitterId());
+            return true;
         }
-        finalizeEndMatch(session, pending.winnerId(), pending.reason(), pending.quitterId());
-        return true;
+
+        if (loserId != null && loserId.equals(playerId)) {
+            markLootPhaseEarlyLeave(sessionId, playerId);
+            stopWinnerLeaveWaitSound(playerId, pending.soundKey());
+            releaseSingleLoserFromLootPhase(session, player);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void markLootPhaseEarlyLeave(String sessionId, UUID playerId) {
+        if (sessionId == null || playerId == null) {
+            return;
+        }
+        lootPhaseEarlyLeavers.compute(sessionId, (id, existing) -> {
+            Set<UUID> set = existing != null ? existing : ConcurrentHashMap.newKeySet();
+            set.add(playerId);
+            return set;
+        });
+    }
+
+    private void releaseSingleLoserFromLootPhase(MatchSession session, Player loser) {
+        if (session == null || loser == null) {
+            return;
+        }
+        UUID loserId = loser.getUniqueId();
+        activeMatches.remove(loserId);
+        clearEliminatedSpectator(loserId);
+        blockExternalSync(loserId, 120_000L);
+        session.endSinglePlayer(loserId, session.getOpponent(loserId), REASON_PLAYER_DEATH);
+        pkManager.restore(loserId);
     }
 
     private void prepareWinnerLootPhase(UUID winnerId, UUID loserId) {
@@ -491,6 +556,8 @@ public class MatchManager {
                     if (!loser.isOnline()) {
                         return;
                     }
+                    MessageUtil.send(loser, "duel_loser_leave_hint",
+                            net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed("command", "/duel dleave"));
                     try {
                         loser.setGameMode(GameMode.ADVENTURE);
                     } catch (Throwable ignored) {
@@ -521,7 +588,7 @@ public class MatchManager {
         }
     }
 
-    private void enforceWinnerLootPhaseState(UUID winnerId, UUID loserId) {
+    private void enforceWinnerLootPhaseState(String sessionId, UUID winnerId, UUID loserId) {
         if (winnerId != null) {
             Player winner = plugin.getServer().getPlayer(winnerId);
             if (winner != null && winner.isOnline()) {
@@ -554,6 +621,10 @@ public class MatchManager {
         }
 
         if (loserId != null) {
+            Set<UUID> leavers = lootPhaseEarlyLeavers.get(sessionId);
+            if (leavers != null && leavers.contains(loserId)) {
+                return;
+            }
             Player loser = plugin.getServer().getPlayer(loserId);
             if (loser != null && loser.isOnline()) {
                 SchedulerUtil.runOnPlayer(plugin, loser, () -> {
@@ -601,6 +672,10 @@ public class MatchManager {
         if (pending != null && pending.task() != null) {
             pending.task().cancel();
         }
+        if (pending != null) {
+            stopWinnerLeaveWaitSound(pending.winnerId(), pending.soundKey());
+            stopWinnerLeaveWaitSound(pending.loserId(), pending.soundKey());
+        }
         debugCombat("endMatch begin reason=" + reason
                 + " winner=" + winner
                 + " p1=" + session.getPlayerA()
@@ -610,6 +685,9 @@ public class MatchManager {
             + " p1=" + session.getPlayerA() + " p2=" + session.getPlayerB());
         blockExternalSync(session.getPlayerA(), 300_000L);
         blockExternalSync(session.getPlayerB(), 300_000L);
+
+        Set<UUID> earlyLeaversRaw = lootPhaseEarlyLeavers.remove(session.getRecoverySessionId());
+        final Set<UUID> earlyLeavers = earlyLeaversRaw != null ? earlyLeaversRaw : java.util.Collections.emptySet();
 
         activeMatches.remove(session.getPlayerA());
         activeMatches.remove(session.getPlayerB());
@@ -625,8 +703,12 @@ public class MatchManager {
             } else if (crashRecoveryManager != null) {
                 crashRecoveryManager.clearRollbackBlocks(session.getRecoverySessionId());
             }
-            handlePendingRestoreFor(session, session.getPlayerA(), quitterId);
-            handlePendingRestoreFor(session, session.getPlayerB(), quitterId);
+            if (!earlyLeavers.contains(session.getPlayerA())) {
+                handlePendingRestoreFor(session, session.getPlayerA(), quitterId);
+            }
+            if (!earlyLeavers.contains(session.getPlayerB())) {
+                handlePendingRestoreFor(session, session.getPlayerB(), quitterId);
+            }
             session.getArena().setStatus(ArenaStatus.FREE);
             clearArenaDrops(session.getArena());
             storeResult(session, winner, reason);
@@ -955,8 +1037,71 @@ public class MatchManager {
         return getHealth(playerId);
     }
 
-    private record PendingWinnerLeave(UUID winnerId, String reason, UUID quitterId,
-                                      io.papermc.paper.threadedregions.scheduler.ScheduledTask task) {
+    private String getWinnerLeaveWaitSoundKey() {
+        if (!plugin.getConfig().getBoolean("match.winner-leave-wait.play-sound", true)) {
+            return null;
+        }
+        String configured = plugin.getConfig().getString("match.winner-leave-wait.sound", "music_disc.otherside");
+        if (configured == null) {
+            return null;
+        }
+        String value = configured.trim();
+        if (value.isEmpty() || "none".equalsIgnoreCase(value) || "off".equalsIgnoreCase(value)
+                || "disabled".equalsIgnoreCase(value)) {
+            return null;
+        }
+        value = value.toLowerCase(Locale.ROOT);
+        if (!value.contains(":")) {
+            value = "minecraft:" + value;
+        }
+        return value;
+    }
+
+    private float getWinnerLeaveWaitSoundVolume() {
+        double configured = plugin.getConfig().getDouble("match.winner-leave-wait.volume", 1.0D);
+        return (float) Math.max(0.0D, Math.min(2.0D, configured));
+    }
+
+    private float getWinnerLeaveWaitSoundPitch() {
+        double configured = plugin.getConfig().getDouble("match.winner-leave-wait.pitch", 1.0D);
+        return (float) Math.max(0.5D, Math.min(2.0D, configured));
+    }
+
+    private void playWinnerLeaveWaitSound(UUID playerId, String soundKey, float volume, float pitch) {
+        if (playerId == null || soundKey == null || soundKey.isBlank()) {
+            return;
+        }
+        Player player = plugin.getServer().getPlayer(playerId);
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        SchedulerUtil.runOnPlayer(plugin, player, () -> {
+            if (!player.isOnline()) {
+                return;
+            }
+            player.stopSound(soundKey);
+            player.playSound(player, soundKey, SoundCategory.RECORDS, volume, pitch);
+        });
+    }
+
+    private void stopWinnerLeaveWaitSound(UUID playerId, String soundKey) {
+        if (playerId == null || soundKey == null || soundKey.isBlank()) {
+            return;
+        }
+        Player player = plugin.getServer().getPlayer(playerId);
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        SchedulerUtil.runOnPlayer(plugin, player, () -> {
+            if (player.isOnline()) {
+                player.stopSound(soundKey);
+            }
+        });
+    }
+
+    private record PendingWinnerLeave(UUID winnerId, UUID loserId, String reason, UUID quitterId,
+                                      io.papermc.paper.threadedregions.scheduler.ScheduledTask task,
+                                      String soundKey) {
     }
 
     private static <K, V> void trimCache(LinkedHashMap<K, V> map, int maxSize) {
@@ -1017,6 +1162,12 @@ public class MatchManager {
     public void handleQuit(Player player) {
         MatchSession session = getMatch(player);
         if (session != null) {
+            boolean dropInventoryMode = session.isDropInventoryMode();
+            if (dropInventoryMode) {
+                processOfflineDefeat(player, true);
+            } else {
+                processOfflineDefeat(player, false);
+            }
             session.ensureSnapshot(player);
             UUID winner = session.getOpponent(player.getUniqueId());
             endMatch(session, winner, REASON_PLAYER_OFFLINE, player.getUniqueId());
@@ -1027,5 +1178,76 @@ public class MatchManager {
             return;
         }
         endBotMatch(botSession, null, REASON_PLAYER_OFFLINE);
+    }
+
+    private void processOfflineDefeat(Player quitter, boolean dropItems) {
+        if (quitter == null) {
+            return;
+        }
+        Location location = quitter.getLocation();
+        if (location == null || location.getWorld() == null) {
+            return;
+        }
+
+        List<ItemStack> drops = List.of();
+        if (dropItems) {
+            drops = collectPlayerDrops(quitter);
+            clearPlayerInventoryForDrop(quitter);
+        }
+
+        World world = location.getWorld();
+        int chunkX = location.getBlockX() >> 4;
+        int chunkZ = location.getBlockZ() >> 4;
+        List<ItemStack> finalDrops = drops;
+        plugin.getServer().getRegionScheduler().run(plugin, world, chunkX, chunkZ, task -> {
+            try {
+                world.strikeLightningEffect(location);
+            } catch (Throwable ignored) {
+            }
+            if (!dropItems || finalDrops.isEmpty()) {
+                return;
+            }
+            for (ItemStack item : finalDrops) {
+                if (item == null || item.getType() == Material.AIR || item.getAmount() <= 0) {
+                    continue;
+                }
+                world.dropItemNaturally(location, item);
+            }
+        });
+    }
+
+    private List<ItemStack> collectPlayerDrops(Player player) {
+        java.util.ArrayList<ItemStack> drops = new java.util.ArrayList<>();
+        if (player == null) {
+            return drops;
+        }
+        for (ItemStack item : player.getInventory().getStorageContents()) {
+            if (item != null && item.getType() != Material.AIR && item.getAmount() > 0) {
+                drops.add(item.clone());
+            }
+        }
+        ItemStack offhand = player.getInventory().getItemInOffHand();
+        if (offhand != null && offhand.getType() != Material.AIR && offhand.getAmount() > 0) {
+            drops.add(offhand.clone());
+        }
+        for (ItemStack armor : player.getInventory().getArmorContents()) {
+            if (armor != null && armor.getType() != Material.AIR && armor.getAmount() > 0) {
+                drops.add(armor.clone());
+            }
+        }
+        return drops;
+    }
+
+    private void clearPlayerInventoryForDrop(Player player) {
+        if (player == null) {
+            return;
+        }
+        try {
+            player.getInventory().clear();
+            player.getInventory().setArmorContents(new ItemStack[4]);
+            player.getInventory().setItemInOffHand(new ItemStack(Material.AIR));
+            player.setItemOnCursor(null);
+        } catch (Throwable ignored) {
+        }
     }
 }

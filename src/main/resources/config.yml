@@ -66,15 +66,58 @@ gui:
     #     glow: false
   duel:
     size: 27          # inventory size (9,18,27,36,45,54)
-    start-slot: 10    # first opponent head slot
-    step: 2           # slot step between opponent heads
-    # Optional static decorative items (e.g. glass border)
-    # decorations:
-    #   - slot: 0
-    #     material: BLACK_STAINED_GLASS_PANE
-    #     name: '&8'
-    #     lore: []
-    #     glow: false
+    start-slot: 10    # legacy field, kept for compatibility
+    step: 2           # legacy field, kept for compatibility
+    button-sound:
+      enabled: true
+      sound: "ui.button.click"
+      volume: 1.0
+      pitch: 1.0
+    controls:
+      submit:
+        slot: 10
+        material: GREEN_STAINED_GLASS_PANE
+        name: "&a&lSend Invite"
+        lore:
+          - "&7Click to send duel invite"
+        glow: true
+      mode:
+        slot: 12
+        material: DIAMOND_SWORD
+        name: "&b&lMode: &f{mode}"
+        lore:
+          - "&7Click to cycle mode"
+          - "&7Left next / Right previous"
+      time:
+        slot: 13
+        material: CLOCK
+        name: "&e&lTime: &f{minutes} min"
+        lore:
+          - "&7Time up = draw"
+          - "&7Click to cycle duration"
+      map:
+        slot: 14
+        material: GRASS_BLOCK
+        name: "&6&lMap: &f{map}"
+        lore:
+          - "&7Click to cycle map"
+          - "&7Left next / Right previous"
+      map-locked-feedback:
+        slot: 14
+        material: BARRIER
+        name: "&c&lMap Locked"
+        lore:
+          - "&7This mode uses a bound map"
+          - "&7Cannot change map"
+        revert-ticks: 30
+      cancel:
+        slot: 16
+        material: RED_STAINED_GLASS_PANE
+        name: "&c&lClose"
+        lore:
+          - "&7Close this menu"
+    # Optional static decorative items can be added manually.
+    # decorations: []
 
 duel:
   request-timeout-seconds: 60 # invite timeout; after this, the duel request is cancelled
@@ -142,6 +185,11 @@ match:
   lock-movement-during-countdown: true # true=lock players in place during countdown; false=allow movement
   round-end-use-vanilla-death-animation: true # true=let lethal hit trigger vanilla death animation (auto-respawn still handled)
   round-end-showcase-ticks: 12 # finisher showcase duration before round-end message (ticks)
+  winner-leave-wait:
+    play-sound: true
+    sound: "music_disc.otherside" # minecraft sound key (without namespace is accepted)
+    volume: 1.0
+    pitch: 1.0
   countdown-title:
     fade-in-ms: 0 # title fade-in (milliseconds)
     stay-ms: 800 # title stay duration (milliseconds)

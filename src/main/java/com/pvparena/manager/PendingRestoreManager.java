@@ -15,9 +15,14 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 
 public class PendingRestoreManager {
     private final JavaPlugin plugin;
+    private final ExecutorService dbExecutor;
     private Connection connection;
     private final Map<UUID, PendingRestoreEntry> pending = new ConcurrentHashMap<>();
     private static final long MAX_ENTRY_AGE_MILLIS = 7L * 24 * 60 * 60 * 1000; // 7 days
@@ -35,8 +40,31 @@ public class PendingRestoreManager {
 
     public PendingRestoreManager(JavaPlugin plugin) {
         this.plugin = plugin;
+        this.dbExecutor = createDbExecutor();
         initDatabase();
         load();
+    }
+
+    private ExecutorService createDbExecutor() {
+        ThreadFactory threadFactory = runnable -> {
+            Thread thread = new Thread(runnable, "pvparena-light-pending-restore-db");
+            thread.setDaemon(true);
+            return thread;
+        };
+        return Executors.newSingleThreadExecutor(threadFactory);
+    }
+
+    private void submitDbTask(Runnable runnable) {
+        if (runnable == null || dbExecutor.isShutdown()) {
+            return;
+        }
+        dbExecutor.execute(() -> {
+            try {
+                runnable.run();
+            } catch (Throwable ex) {
+                plugin.getLogger().severe("Pending restore DB task failed: " + ex.getMessage());
+            }
+        });
     }
 
     private void initDatabase() {
@@ -94,7 +122,7 @@ public class PendingRestoreManager {
             plugin.getLogger().severe("Failed to clear pending restores: " + ex.getMessage());
         }
         for (Map.Entry<UUID, PendingRestoreEntry> entry : pending.entrySet()) {
-            insert(entry.getKey(), entry.getValue().snapshot, entry.getValue().createdAt);
+            insertBlocking(entry.getKey(), entry.getValue().snapshot, entry.getValue().createdAt);
         }
     }
 
@@ -203,6 +231,10 @@ public class PendingRestoreManager {
     }
 
     private void insert(UUID playerId, PlayerSnapshot snapshot, long createdAt) {
+        submitDbTask(() -> insertBlocking(playerId, snapshot, createdAt));
+    }
+
+    private void insertBlocking(UUID playerId, PlayerSnapshot snapshot, long createdAt) {
         if (connection == null) {
             return;
         }
@@ -221,6 +253,10 @@ public class PendingRestoreManager {
     }
 
     private void delete(UUID playerId) {
+        submitDbTask(() -> deleteBlocking(playerId));
+    }
+
+    private void deleteBlocking(UUID playerId) {
         if (connection == null) {
             return;
         }
@@ -234,6 +270,21 @@ public class PendingRestoreManager {
     }
 
     public void close() {
+        if (!dbExecutor.isShutdown()) {
+            dbExecutor.execute(this::closeConnectionBlocking);
+            dbExecutor.shutdown();
+            try {
+                if (!dbExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    dbExecutor.shutdownNow();
+                }
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                dbExecutor.shutdownNow();
+            }
+        }
+    }
+
+    private void closeConnectionBlocking() {
         try {
             if (connection != null && !connection.isClosed()) {
                 connection.close();
