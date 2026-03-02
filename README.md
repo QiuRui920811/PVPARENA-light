@@ -28,8 +28,8 @@ Advanced PvP practice plugin for Paper/Folia with duel flow, queue matching, are
 
 1. Create arena: `/arena create <id> [world]`
 2. Set spawns: `/arena setspawn <id> <1|2>`
-3. Set bounds: `/arena setbounds <id> wand` (or coordinate mode)
-4. Open menu: `/pvp`
+3. set kit: `/arena addkit <id>`
+3. Open menu: `/pvp`
 
 ## Winner Leave Wait Music
 
