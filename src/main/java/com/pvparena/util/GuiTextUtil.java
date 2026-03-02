@@ -23,7 +23,11 @@ public final class GuiTextUtil {
         if (input == null) {
             return Component.empty();
         }
-        String value = input;
+        String value = input
+            .replace("\\n", "\n")
+            .replace("{nl}", "\n")
+            .replace("<nl>", "\n")
+            .replace("/-n", "\n");
         if (looksLikeMiniMessage(value)) {
             try {
                 return MINI_MESSAGE.deserialize(value);

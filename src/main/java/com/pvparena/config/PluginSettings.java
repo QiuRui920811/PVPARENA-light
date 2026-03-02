@@ -505,7 +505,7 @@ public class PluginSettings {
             Object loreObj = raw.get("lore");
             if (loreObj instanceof List<?> loreList) {
                 for (Object line : loreList) {
-                    lore.add(String.valueOf(line));
+                    lore.addAll(normalizeLoreLines(String.valueOf(line)));
                 }
             }
             Object glowObj = raw.containsKey("glow") ? raw.get("glow") : false;
@@ -537,8 +537,37 @@ public class PluginSettings {
         if (lore == null || lore.isEmpty()) {
             lore = new ArrayList<>(defaultLore == null ? List.of() : defaultLore);
         }
+        lore = normalizeLoreLines(lore);
         boolean glow = config.getBoolean(path + ".glow", defaultGlow);
         return new GuiControlItem(slot, material, name == null ? "" : name, lore, glow);
+    }
+
+    private List<String> normalizeLoreLines(List<String> source) {
+        List<String> out = new ArrayList<>();
+        if (source == null) {
+            return out;
+        }
+        for (String line : source) {
+            out.addAll(normalizeLoreLines(line));
+        }
+        return out;
+    }
+
+    private List<String> normalizeLoreLines(String line) {
+        List<String> out = new ArrayList<>();
+        if (line == null) {
+            return out;
+        }
+        String normalized = line
+                .replace("\\n", "\n")
+                .replace("{nl}", "\n")
+                .replace("<nl>", "\n")
+                .replace("/-n", "\n");
+        String[] split = normalized.split("\\n", -1);
+        for (String part : split) {
+            out.add(part);
+        }
+        return out;
     }
 
     private int clampSlot(int slot, int invSize) {
