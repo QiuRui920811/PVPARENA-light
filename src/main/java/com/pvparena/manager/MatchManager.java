@@ -7,6 +7,7 @@ import com.pvparena.model.BotDifficulty;
 import com.pvparena.model.BotMatchSession;
 import com.pvparena.model.MatchSession;
 import com.pvparena.model.Mode;
+import com.pvparena.rollback.ArenaRollbackService;
 import com.pvparena.util.MessageUtil;
 import com.pvparena.util.SchedulerUtil;
 import net.kyori.adventure.text.Component;
@@ -29,12 +30,16 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -53,6 +58,7 @@ public class MatchManager {
     private final ModeManager modeManager;
     private final PendingRestoreManager pendingRestoreManager;
     private final MatchCrashRecoveryManager crashRecoveryManager;
+    private final ArenaRollbackService rollbackService;
     private final PkManager pkManager;
     private SpectatorManager spectatorManager;
     private final Map<UUID, MatchSession> activeMatches = new ConcurrentHashMap<>();
@@ -71,6 +77,7 @@ public class MatchManager {
     private final Map<String, MatchCrashRecoveryManager.RecoveredMatch> pendingRecoveredMatches = new ConcurrentHashMap<>();
     private final Map<String, PendingWinnerLeave> pendingWinnerLeaves = new ConcurrentHashMap<>();
     private final Map<String, Set<UUID>> lootPhaseEarlyLeavers = new ConcurrentHashMap<>();
+    private final Set<String> preheatedArenaIds = ConcurrentHashMap.newKeySet();
     private static final long BACK_BLOCK_MILLIS = 60_000L;
 
     public MatchManager(JavaPlugin plugin, ArenaManager arenaManager, QueueManager queueManager, ModeManager modeManager,
@@ -82,11 +89,13 @@ public class MatchManager {
         this.modeManager = modeManager;
         this.pendingRestoreManager = pendingRestoreManager;
         this.crashRecoveryManager = crashRecoveryManager;
+        this.rollbackService = new ArenaRollbackService(plugin);
         this.pkManager = pkManager;
         this.queueManager.setMatchManager(this);
     }
 
     public void bootstrapCrashRecovery() {
+        rollbackService.recoverPendingSnapshots();
         if (crashRecoveryManager == null) {
             return;
         }
@@ -169,7 +178,17 @@ public class MatchManager {
         activeMatches.put(recovered.playerB(), session);
         MessageUtil.send(player1, "matched_mode", net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed("mode", mode.getDisplayName()));
         MessageUtil.send(player2, "matched_mode", net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed("mode", mode.getDisplayName()));
-        session.start();
+        long staggerTicks = Math.max(0L, plugin.getConfig().getLong("match.start-stagger-ticks", 1L));
+        if (staggerTicks <= 0L) {
+            session.start();
+            return;
+        }
+        plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task -> {
+            if (activeMatches.get(recovered.playerA()) != session || activeMatches.get(recovered.playerB()) != session) {
+                return;
+            }
+            session.start();
+        }, staggerTicks);
     }
 
     public boolean isAwaitingCrashResume(UUID playerId) {
@@ -259,7 +278,17 @@ public class MatchManager {
                 + " activeSize=" + activeMatches.size());
         MessageUtil.send(player1, "matched_mode", net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed("mode", mode.getDisplayName()));
         MessageUtil.send(player2, "matched_mode", net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed("mode", mode.getDisplayName()));
-        session.start();
+        long staggerTicks = Math.max(0L, plugin.getConfig().getLong("match.start-stagger-ticks", 1L));
+        if (staggerTicks <= 0L) {
+            session.start();
+            return;
+        }
+        plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task -> {
+            if (activeMatches.get(p1) != session || activeMatches.get(p2) != session) {
+                return;
+            }
+            session.start();
+        }, staggerTicks);
     }
 
     public void startBotMatch(UUID playerId, String modeId, Arena arena) {
@@ -512,6 +541,7 @@ public class MatchManager {
         blockExternalSync(loserId, 120_000L);
         session.endSinglePlayer(loserId, session.getOpponent(loserId), REASON_PLAYER_DEATH);
         pkManager.restore(loserId);
+        restorePostMatchPlayerState(loser);
     }
 
     private void prepareWinnerLootPhase(UUID winnerId, UUID loserId) {
@@ -710,7 +740,9 @@ public class MatchManager {
                 handlePendingRestoreFor(session, session.getPlayerB(), quitterId);
             }
             session.getArena().setStatus(ArenaStatus.FREE);
-            clearArenaDrops(session.getArena());
+            if (shouldClearArenaDropsOnEnd(session)) {
+                clearArenaDrops(session.getArena());
+            }
             storeResult(session, winner, reason);
             sendResultSummary(session);
             synchronized (backBlockUntil) {
@@ -720,6 +752,14 @@ public class MatchManager {
             }
             pkManager.restore(session.getPlayerA());
             pkManager.restore(session.getPlayerB());
+            Player playerAOnline = plugin.getServer().getPlayer(session.getPlayerA());
+            if (playerAOnline != null && playerAOnline.isOnline()) {
+                restorePostMatchPlayerState(playerAOnline);
+            }
+            Player playerBOnline = plugin.getServer().getPlayer(session.getPlayerB());
+            if (playerBOnline != null && playerBOnline.isOnline()) {
+                restorePostMatchPlayerState(playerBOnline);
+            }
             session.end(winner, reason);
             if (spectatorManager != null) {
                 spectatorManager.handleMatchEnded(session);
@@ -834,18 +874,26 @@ public class MatchManager {
         if (world == null) {
             return;
         }
-        long[] passes = new long[]{1L, 2L, 10L, 20L};
         int minChunkX = Math.min(arena.getMinBound().getBlockX(), arena.getMaxBound().getBlockX()) >> 4;
         int maxChunkX = Math.max(arena.getMinBound().getBlockX(), arena.getMaxBound().getBlockX()) >> 4;
         int minChunkZ = Math.min(arena.getMinBound().getBlockZ(), arena.getMaxBound().getBlockZ()) >> 4;
         int maxChunkZ = Math.max(arena.getMinBound().getBlockZ(), arena.getMaxBound().getBlockZ()) >> 4;
-
-        for (long delay : passes) {
-            for (int cx = minChunkX; cx <= maxChunkX; cx++) {
-                for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
-                    final int chunkX = cx;
-                    final int chunkZ = cz;
-                    Bukkit.getRegionScheduler().runDelayed(plugin, world, chunkX, chunkZ, task -> {
+        java.util.ArrayDeque<long[]> chunks = new java.util.ArrayDeque<>();
+        for (int cx = minChunkX; cx <= maxChunkX; cx++) {
+            for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
+                chunks.offer(new long[]{cx, cz});
+            }
+        }
+        final int chunksPerTick = 2;
+        Runnable runner = new Runnable() {
+            @Override
+            public void run() {
+                int processed = 0;
+                while (processed < chunksPerTick && !chunks.isEmpty()) {
+                    long[] coord = chunks.poll();
+                    int chunkX = (int) coord[0];
+                    int chunkZ = (int) coord[1];
+                    Bukkit.getRegionScheduler().run(plugin, world, chunkX, chunkZ, task -> {
                         if (!world.isChunkLoaded(chunkX, chunkZ)) {
                             return;
                         }
@@ -861,10 +909,22 @@ public class MatchManager {
                                 entity.remove();
                             }
                         }
-                    }, delay);
+                    });
+                    processed++;
+                }
+                if (!chunks.isEmpty()) {
+                    Bukkit.getGlobalRegionScheduler().runDelayed(plugin, t -> run(), 1L);
                 }
             }
+        };
+        Bukkit.getGlobalRegionScheduler().run(plugin, t -> runner.run());
+    }
+
+    private boolean shouldClearArenaDropsOnEnd(MatchSession session) {
+        if (session == null) {
+            return false;
         }
+        return plugin.getConfig().getBoolean("match.clear-arena-drops-on-end", true);
     }
 
     private void handlePendingRestoreFor(MatchSession session, UUID playerId, UUID quitterId) {
@@ -943,6 +1003,128 @@ public class MatchManager {
 
     public PkManager getPkManager() {
         return pkManager;
+    }
+
+    public ArenaRollbackService getRollbackService() {
+        return rollbackService;
+    }
+
+    public boolean tryMarkArenaPreheated(String arenaId) {
+        if (arenaId == null || arenaId.isBlank()) {
+            return false;
+        }
+        return preheatedArenaIds.add(arenaId.toLowerCase(Locale.ROOT));
+    }
+
+    public void warmupArenaChunksAsync(Collection<Arena> arenas) {
+        if (arenas == null || arenas.isEmpty()) {
+            return;
+        }
+        List<Arena> queue = new ArrayList<>();
+        for (Arena arena : arenas) {
+            if (arena == null || arena.getId() == null || arena.getId().isBlank()) {
+                continue;
+            }
+            if (arena.getSpawn1() == null || arena.getSpawn2() == null
+                    || arena.getSpawn1().getWorld() == null || arena.getSpawn2().getWorld() == null) {
+                continue;
+            }
+            if (!arena.getSpawn1().getWorld().getName().equalsIgnoreCase(arena.getSpawn2().getWorld().getName())) {
+                continue;
+            }
+            if (!tryMarkArenaPreheated(arena.getId())) {
+                continue;
+            }
+            queue.add(arena);
+        }
+        if (queue.isEmpty()) {
+            return;
+        }
+        runArenaChunkWarmupQueue(queue, 0, getArenaWarmupDelayTicks());
+    }
+
+    private void runArenaChunkWarmupQueue(List<Arena> queue, int index, long delayTicks) {
+        if (queue == null || index >= queue.size()) {
+            return;
+        }
+        Arena arena = queue.get(index);
+        warmupSingleArenaChunksAsync(arena).whenComplete((v, ex) ->
+                plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin,
+                        task -> runArenaChunkWarmupQueue(queue, index + 1, delayTicks), Math.max(1L, delayTicks)));
+    }
+
+    private CompletableFuture<Void> warmupSingleArenaChunksAsync(Arena arena) {
+        if (arena == null || arena.getSpawn1() == null || arena.getSpawn1().getWorld() == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        int radius = Math.max(0, plugin.getConfig().getInt("match.preheat-radius-chunks", 1));
+        int perTick = Math.max(1, plugin.getConfig().getInt("match.preheat-chunks-per-tick", 2));
+        World world = arena.getSpawn1().getWorld();
+
+        Set<Long> chunkKeys = new HashSet<>();
+        collectPreheatChunks(chunkKeys, arena.getSpawn1(), radius);
+        collectPreheatChunks(chunkKeys, arena.getSpawn2(), radius);
+        if (chunkKeys.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        runArenaPreheatBatch(world, new ArrayList<>(chunkKeys), 0, perTick, done);
+        return done.exceptionally(ex -> null);
+    }
+
+    private void runArenaPreheatBatch(World world, List<Long> pendingChunks, int startIndex, int perTick, CompletableFuture<Void> done) {
+        if (done.isDone()) {
+            return;
+        }
+        if (world == null || pendingChunks == null || pendingChunks.isEmpty() || startIndex >= pendingChunks.size()) {
+            done.complete(null);
+            return;
+        }
+
+        int end = Math.min(pendingChunks.size(), startIndex + Math.max(1, perTick));
+        for (int i = startIndex; i < end; i++) {
+            long key = pendingChunks.get(i);
+            int chunkX = unpackChunkX(key);
+            int chunkZ = unpackChunkZ(key);
+            world.getChunkAtAsync(chunkX, chunkZ, true).exceptionally(ex -> null);
+        }
+
+        if (end < pendingChunks.size()) {
+            plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin,
+                    task -> runArenaPreheatBatch(world, pendingChunks, end, perTick, done), 1L);
+            return;
+        }
+        done.complete(null);
+    }
+
+    private void collectPreheatChunks(Set<Long> chunkKeys, Location center, int radius) {
+        if (chunkKeys == null || center == null || center.getWorld() == null) {
+            return;
+        }
+        int centerChunkX = center.getBlockX() >> 4;
+        int centerChunkZ = center.getBlockZ() >> 4;
+        for (int x = centerChunkX - radius; x <= centerChunkX + radius; x++) {
+            for (int z = centerChunkZ - radius; z <= centerChunkZ + radius; z++) {
+                chunkKeys.add(packChunkKey(x, z));
+            }
+        }
+    }
+
+    private long getArenaWarmupDelayTicks() {
+        return Math.max(1L, plugin.getConfig().getLong("match.preheat-arena-delay-ticks", 2L));
+    }
+
+    private long packChunkKey(int chunkX, int chunkZ) {
+        return (((long) chunkX) << 32) ^ (chunkZ & 0xffffffffL);
+    }
+
+    private int unpackChunkX(long packedKey) {
+        return (int) (packedKey >> 32);
+    }
+
+    private int unpackChunkZ(long packedKey) {
+        return (int) packedKey;
     }
 
     public void recordRollbackBaseline(String sessionId, org.bukkit.Location location, org.bukkit.block.data.BlockData data) {
@@ -1250,4 +1432,43 @@ public class MatchManager {
         } catch (Throwable ignored) {
         }
     }
+
+    private void restorePostMatchPlayerState(Player player) {
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        SchedulerUtil.runOnPlayer(plugin, player, () -> {
+            if (!player.isOnline()) {
+                return;
+            }
+            try {
+                if (player.getGameMode() == GameMode.ADVENTURE) {
+                    player.setGameMode(GameMode.SURVIVAL);
+                }
+            } catch (Throwable ignored) {
+            }
+            try {
+                player.setInvisible(false);
+            } catch (Throwable ignored) {
+            }
+            try {
+                player.setInvulnerable(false);
+            } catch (Throwable ignored) {
+            }
+            try {
+                player.setCollidable(true);
+            } catch (Throwable ignored) {
+            }
+            try {
+                player.setCanPickupItems(true);
+            } catch (Throwable ignored) {
+            }
+            try {
+                player.setAllowFlight(false);
+                player.setFlying(false);
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
 }

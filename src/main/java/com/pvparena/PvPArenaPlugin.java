@@ -29,6 +29,7 @@ import com.pvparena.listener.KitEditorListener;
 import com.pvparena.listener.MatchListener;
 import com.pvparena.listener.WorldLoadListener;
 import com.pvparena.listener.PlayerListener;
+import com.pvparena.listener.PvpFlowIsolationListener;
 import com.pvparena.listener.ResultMenuListener;
 import com.pvparena.listener.SelectionListener;
 import com.pvparena.listener.SpectatorAdminMenuListener;
@@ -152,6 +153,7 @@ public class PvPArenaPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new GuiListener(this, mainMenu, queueManager, modeManager), this);
         getServer().getPluginManager().registerEvents(new KitEditorListener(kitManager, modeManager), this);
         getServer().getPluginManager().registerEvents(new MatchListener(matchManager, pkManager, settings), this);
+        getServer().getPluginManager().registerEvents(new PvpFlowIsolationListener(), this);
         getServer().getPluginManager().registerEvents(new PlayerListener(this, queueManager, matchManager, pkManager, settings), this);
         getServer().getPluginManager().registerEvents(new ResultMenuListener(resultMenu), this);
         getServer().getPluginManager().registerEvents(new DuelMenuListener(duelMenu, duelManager), this);
@@ -162,6 +164,8 @@ public class PvPArenaPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new WorldLoadListener(this), this);
 
         matchManager.bootstrapCrashRecovery();
+        scheduleRollbackBaselineWarmup(5L);
+        scheduleArenaChunkWarmup(10L);
 
         getCommand("pvp").setExecutor(new PvpCommand(mainMenu, matchManager, spectatorManager, spectatorBrowseMenu));
         getCommand("pvp").setTabCompleter(new PvpTabCompleter(matchManager));
@@ -182,6 +186,8 @@ public class PvPArenaPlugin extends JavaPlugin {
                 arenaManager.load();
             }
             setupPvWorld();
+            scheduleRollbackBaselineWarmup(20L);
+            scheduleArenaChunkWarmup(30L);
         }, 40L);
 
         menuRefreshTask = Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, task -> {
@@ -195,6 +201,37 @@ public class PvPArenaPlugin extends JavaPlugin {
         }
 
         logStartupInfo();
+    }
+
+    private void scheduleRollbackBaselineWarmup(long delayTicks) {
+        if (matchManager == null || arenaManager == null) {
+            return;
+        }
+        long delay = Math.max(1L, delayTicks);
+        Bukkit.getGlobalRegionScheduler().runDelayed(this, task -> {
+            try {
+                matchManager.getRollbackService().warmupArenaBaselinesAsync(arenaManager.getArenas());
+            } catch (Throwable ex) {
+                getLogger().warning("Failed to schedule rollback baseline warmup: " + ex.getMessage());
+            }
+        }, delay);
+    }
+
+    private void scheduleArenaChunkWarmup(long delayTicks) {
+        if (matchManager == null || arenaManager == null) {
+            return;
+        }
+        if (!getConfig().getBoolean("match.preheat-arena-chunks-on-first-start", true)) {
+            return;
+        }
+        long delay = Math.max(1L, delayTicks);
+        Bukkit.getGlobalRegionScheduler().runDelayed(this, task -> {
+            try {
+                matchManager.warmupArenaChunksAsync(arenaManager.getArenas());
+            } catch (Throwable ex) {
+                getLogger().warning("Failed to schedule arena chunk warmup: " + ex.getMessage());
+            }
+        }, delay);
     }
 
     private boolean tryHookHuskSyncApi(MatchManager matchManager) {

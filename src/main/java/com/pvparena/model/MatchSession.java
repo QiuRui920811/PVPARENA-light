@@ -3,6 +3,7 @@ package com.pvparena.model;
 import com.pvparena.manager.MatchManager;
 import com.pvparena.util.MessageUtil;
 import com.pvparena.util.PlayerStateUtil;
+import com.pvparena.util.PvpFlowIsolation;
 import com.pvparena.util.SchedulerUtil;
 import fr.mrmicky.fastboard.FastBoard;
 import me.clip.placeholderapi.PlaceholderAPI;
@@ -38,6 +39,7 @@ import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.HashMap;
@@ -86,11 +88,18 @@ public class MatchSession {
     private volatile int duelTimeLimitSeconds = 0;
     private long hudTickCounter = 0L;
     private volatile boolean roundSidebarAvailable = true;
+    private volatile boolean duelIsolationApplied = false;
     private volatile boolean roundResolving = false;
     private volatile int lastResolvedRound = 0;
     private volatile int resolvingRound = 0;
     private volatile boolean winnerLeaveCountdownStarted = false;
     private volatile boolean resumedFromRecovery = false;
+    private final Set<Long> forcedArenaChunks = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Long> recentDefeatLightningAt = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile CompletableFuture<Void> preFightPrepareFuture = CompletableFuture.completedFuture(null);
+    private volatile boolean fightStartPending = false;
+    private volatile boolean rollbackSessionInitialized = false;
+    private volatile boolean arenaPreheatTriggered = false;
 
     public MatchSession(JavaPlugin plugin, MatchManager matchManager, UUID playerA, UUID playerB, Mode mode, Arena arena) {
         this.plugin = plugin;
@@ -180,7 +189,7 @@ public class MatchSession {
     }
 
     public long getRoundResolveDelayTicks() {
-        return Math.max(0L, Math.min(100L, plugin.getConfig().getLong("match.round-end-showcase-ticks", 12L)));
+        return Math.max(0L, Math.min(100L, plugin.getConfig().getLong("match.round-end-showcase-ticks", 0L)));
     }
 
     public UUID getOpponent(UUID player) {
@@ -236,7 +245,10 @@ public class MatchSession {
     }
 
     public boolean allowsBlockEdit() {
-        return mode.getSettings().isBuildEnabled() && isFighting();
+        if (!mode.getSettings().isBuildEnabled()) {
+            return false;
+        }
+        return isFighting() || roundResolving;
     }
 
     public boolean isDropInventoryMode() {
@@ -325,17 +337,13 @@ public class MatchSession {
     }
 
     public void captureBlockBeforeBreak(Block block) {
-        if (block == null || !mode.getSettings().isBuildEnabled()) {
+        if (block == null || !isRollbackActive()) {
             return;
         }
         if (!isInArenaRollbackArea(block.getLocation())) {
             return;
         }
-        BlockKey key = BlockKey.of(block.getLocation());
-        synchronized (originalArenaBlocks) {
-            originalArenaBlocks.putIfAbsent(key, block.getBlockData().clone());
-        }
-        matchManager.recordRollbackBaseline(recoverySessionId, block.getLocation(), block.getBlockData().clone());
+        matchManager.getRollbackService().markDirty(recoverySessionId, block);
     }
 
     public boolean canBreakPlacedBlock(Block block) {
@@ -375,17 +383,13 @@ public class MatchSession {
     }
 
     public void captureBlockBeforePlace(BlockState replacedState) {
-        if (replacedState == null || !mode.getSettings().isBuildEnabled()) {
+        if (replacedState == null || !isRollbackActive()) {
             return;
         }
         if (!isInArenaRollbackArea(replacedState.getLocation())) {
             return;
         }
-        BlockKey key = BlockKey.of(replacedState.getLocation());
-        synchronized (originalArenaBlocks) {
-            originalArenaBlocks.putIfAbsent(key, replacedState.getBlockData().clone());
-        }
-        matchManager.recordRollbackBaseline(recoverySessionId, replacedState.getLocation(), replacedState.getBlockData().clone());
+        matchManager.getRollbackService().markDirty(recoverySessionId, replacedState.getBlock());
     }
 
     public void rollbackArenaChanges() {
@@ -393,34 +397,84 @@ public class MatchSession {
     }
 
     public CompletableFuture<Void> rollbackArenaChangesAsync() {
-        List<Map.Entry<BlockKey, BlockData>> entries;
+        Set<BlockKey> placedToClear = new HashSet<>();
         synchronized (originalArenaBlocks) {
+            placedToClear.addAll(playerPlacedBlocks);
             playerPlacedBlocks.clear();
-            if (originalArenaBlocks.isEmpty()) {
-                return CompletableFuture.completedFuture(null);
-            }
-            entries = new ArrayList<>(originalArenaBlocks.entrySet());
             originalArenaBlocks.clear();
         }
-        Map<String, List<Map.Entry<BlockKey, BlockData>>> byWorld = new HashMap<>();
-        for (Map.Entry<BlockKey, BlockData> entry : entries) {
-            byWorld.computeIfAbsent(entry.getKey().worldId, k -> new ArrayList<>()).add(entry);
+
+        CompletableFuture<Void> clearPlacedFuture = clearPlacedBlocksAsync(placedToClear);
+        if (!isRollbackActive()) {
+            return clearPlacedFuture;
+        }
+
+        CompletableFuture<Void> rollbackFuture = matchManager.getRollbackService().rollbackAndClose(recoverySessionId)
+                .exceptionally(ex -> null);
+        return CompletableFuture.allOf(rollbackFuture, clearPlacedFuture);
+    }
+
+    private CompletableFuture<Void> clearPlacedBlocksAsync(Set<BlockKey> placedBlocks) {
+        if (placedBlocks == null || placedBlocks.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        Map<String, Map<Long, List<BlockKey>>> byWorldChunk = new HashMap<>();
+        for (BlockKey key : placedBlocks) {
+            if (key == null || key.worldId == null || key.worldId.isBlank()) {
+                continue;
+            }
+            long chunkKey = packChunkKey(key.x >> 4, key.z >> 4);
+            byWorldChunk
+                    .computeIfAbsent(key.worldId, k -> new HashMap<>())
+                    .computeIfAbsent(chunkKey, k -> new ArrayList<>())
+                    .add(key);
+        }
+
+        if (byWorldChunk.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
         }
 
         List<CompletableFuture<Void>> futures = new ArrayList<>();
-        futures.addAll(applyRollbackPass(byWorld, 0L));
-        long secondPassDelay = getRollbackSecondPassDelayTicks();
-        if (secondPassDelay > 0L) {
-            futures.addAll(applyRollbackPass(byWorld, secondPassDelay));
+        for (Map.Entry<String, Map<Long, List<BlockKey>>> worldEntry : byWorldChunk.entrySet()) {
+            World world = plugin.getServer().getWorld(worldEntry.getKey());
+            if (world == null) {
+                continue;
+            }
+            for (Map.Entry<Long, List<BlockKey>> chunkEntry : worldEntry.getValue().entrySet()) {
+                int chunkX = unpackChunkX(chunkEntry.getKey());
+                int chunkZ = unpackChunkZ(chunkEntry.getKey());
+                List<BlockKey> keys = chunkEntry.getValue();
+                CompletableFuture<Void> one = new CompletableFuture<>();
+                futures.add(one);
+                plugin.getServer().getRegionScheduler().run(plugin, world, chunkX, chunkZ, task -> {
+                    try {
+                        for (BlockKey key : keys) {
+                            Block block = world.getBlockAt(key.x, key.y, key.z);
+                            if (block.getType() != Material.AIR) {
+                                block.setType(Material.AIR, false);
+                            }
+                        }
+                        one.complete(null);
+                    } catch (Throwable ex) {
+                        one.completeExceptionally(ex);
+                    }
+                });
+            }
         }
+
         if (futures.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).exceptionally(ex -> null);
     }
 
     private int getRollbackBoundsExpand() {
         return Math.max(1, plugin.getConfig().getInt("rollback.bounds-expand", 3));
+    }
+
+    private int getRollbackBoundsExpandY() {
+        return Math.max(1, plugin.getConfig().getInt("rollback.bounds-expand-y", Math.max(8, getRollbackBoundsExpand())));
     }
 
     private int getRollbackBlocksPerTick() {
@@ -429,6 +483,14 @@ public class MatchSession {
 
     private long getRollbackSecondPassDelayTicks() {
         return Math.max(0L, plugin.getConfig().getLong("rollback.second-pass-delay-ticks", 0L));
+    }
+
+    private int getRollbackUnloadedChunkRetries() {
+        return Math.max(0, plugin.getConfig().getInt("rollback.unloaded-chunk-retries", 20));
+    }
+
+    private long getRollbackUnloadedChunkRetryDelayTicks() {
+        return Math.max(1L, plugin.getConfig().getLong("rollback.unloaded-chunk-retry-delay-ticks", 5L));
     }
 
     private List<CompletableFuture<Void>> applyRollbackPass(Map<String, List<Map.Entry<BlockKey, BlockData>>> byWorld, long delayTicks) {
@@ -456,10 +518,10 @@ public class MatchSession {
                 futures.add(chunkDone);
                 if (delayTicks <= 0L) {
                     plugin.getServer().getRegionScheduler().run(plugin, world, chunkX, chunkZ,
-                            task -> applyChunkRollbackBatch(world, chunkX, chunkZ, chunkBlocks, 0, blocksPerTick, chunkDone));
+                            task -> applyChunkRollbackBatch(world, chunkX, chunkZ, chunkBlocks, 0, blocksPerTick, chunkDone, 0));
                 } else {
                     plugin.getServer().getRegionScheduler().runDelayed(plugin, world, chunkX, chunkZ,
-                            task -> applyChunkRollbackBatch(world, chunkX, chunkZ, chunkBlocks, 0, blocksPerTick, chunkDone), delayTicks);
+                            task -> applyChunkRollbackBatch(world, chunkX, chunkZ, chunkBlocks, 0, blocksPerTick, chunkDone, 0), delayTicks);
                 }
             }
         }
@@ -469,7 +531,26 @@ public class MatchSession {
     private void applyChunkRollbackBatch(World world, int chunkX, int chunkZ,
                                          List<Map.Entry<BlockKey, BlockData>> chunkBlocks,
                                          int startIndex, int blocksPerTick,
-                                         CompletableFuture<Void> done) {
+                                         CompletableFuture<Void> done,
+                                         int unloadedRetries) {
+        if (!world.isChunkLoaded(chunkX, chunkZ)) {
+            int maxRetries = getRollbackUnloadedChunkRetries();
+            if (unloadedRetries < maxRetries) {
+                long retryDelay = getRollbackUnloadedChunkRetryDelayTicks();
+                plugin.getServer().getRegionScheduler().runDelayed(plugin, world, chunkX, chunkZ,
+                        task -> applyChunkRollbackBatch(world, chunkX, chunkZ, chunkBlocks, startIndex, blocksPerTick, done, unloadedRetries + 1),
+                        retryDelay);
+                return;
+            }
+            try {
+                world.getChunkAt(chunkX, chunkZ);
+            } catch (Throwable ignored) {
+            }
+            if (!world.isChunkLoaded(chunkX, chunkZ)) {
+                done.complete(null);
+                return;
+            }
+        }
         int end = Math.min(chunkBlocks.size(), startIndex + blocksPerTick);
         try {
             for (int i = startIndex; i < end; i++) {
@@ -486,7 +567,7 @@ public class MatchSession {
         }
         if (end < chunkBlocks.size()) {
             plugin.getServer().getRegionScheduler().runDelayed(plugin, world, chunkX, chunkZ,
-                    task -> applyChunkRollbackBatch(world, chunkX, chunkZ, chunkBlocks, end, blocksPerTick, done), 1L);
+                    task -> applyChunkRollbackBatch(world, chunkX, chunkZ, chunkBlocks, end, blocksPerTick, done, 0), 1L);
             return;
         }
         done.complete(null);
@@ -499,30 +580,205 @@ public class MatchSession {
             roundsWonB = 0;
             currentRound = 1;
         }
-        rollbackArenaChangesAsync().thenCompose(v -> cleanupArenaTransientArtifactsAsync()).whenComplete((rv, rex) -> {
-            Player p1 = plugin.getServer().getPlayer(playerA);
-            Player p2 = plugin.getServer().getPlayer(playerB);
-            if (p1 == null || p2 == null) {
-                matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
+        Player p1 = plugin.getServer().getPlayer(playerA);
+        Player p2 = plugin.getServer().getPlayer(playerB);
+        if (p1 == null || p2 == null) {
+            matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
+            return;
+        }
+        if (arena.getSpawn1() == null || arena.getSpawn2() == null) {
+            matchManager.endMatch(this, null, MatchManager.REASON_ARENA_SPAWN_UNSET);
+            return;
+        }
+        beginFlowIsolation(p1, p2);
+        state = MatchState.PREPARING;
+        preFightPrepareFuture = prepareArenaForFightAsync();
+        fightStartPending = false;
+        Location spawn1 = arena.getSpawn1();
+        Location spawn2 = arena.getSpawn2();
+        CompletableFuture<Void> prep = prepareAndTeleport(p1, spawn1, true)
+                .thenCompose(v -> waitStateApplyTicks())
+                .thenCompose(v -> prepareAndTeleport(p2, spawn2, false));
+        prep.whenComplete((v, ex) -> {
+            if (ex != null) {
+                matchManager.endMatch(this, null, MatchManager.REASON_TELEPORT_FAILED);
                 return;
             }
-            if (arena.getSpawn1() == null || arena.getSpawn2() == null) {
-                matchManager.endMatch(this, null, MatchManager.REASON_ARENA_SPAWN_UNSET);
-                return;
-            }
-            state = MatchState.PREPARING;
-            Location spawn1 = arena.getSpawn1();
-            Location spawn2 = arena.getSpawn2();
-            CompletableFuture<Void> f1 = prepareAndTeleport(p1, spawn1, true);
-            CompletableFuture<Void> f2 = prepareAndTeleport(p2, spawn2, false);
-            CompletableFuture.allOf(f1, f2).thenCompose(v -> captureArenaBaselineAsync()).whenComplete((v, ex) -> {
-                if (ex != null) {
-                    matchManager.endMatch(this, null, MatchManager.REASON_TELEPORT_FAILED);
-                    return;
-                }
-                startCountdown(p1, p2);
-            });
+            startCountdownWhenArenaReady(p1, p2, 0L, 0);
         });
+    }
+
+    private CompletableFuture<Void> prepareArenaForFightAsync() {
+        return rollbackArenaChangesAsync()
+                .exceptionally(ex -> null)
+                .thenCompose(v -> cleanupArenaTransientArtifactsAsync().exceptionally(ex -> null))
+                .thenCompose(v -> captureArenaBaselineAsync().exceptionally(ex -> null));
+    }
+
+    private boolean shouldForceLoadArenaChunks() {
+        return plugin.getConfig().getBoolean("match.force-load-arena-chunks", true);
+    }
+
+    private CompletableFuture<Void> ensureArenaChunksForceLoadedAsync() {
+        if (!shouldForceLoadArenaChunks()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (arena == null || arena.getMinBound() == null || arena.getMaxBound() == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        World world = org.bukkit.Bukkit.getWorld(arena.getWorldName());
+        if (world == null) {
+            world = arena.getMinBound().getWorld();
+        }
+        if (world == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        final World targetWorld = world;
+
+        int minChunkX = Math.min(arena.getMinBound().getBlockX(), arena.getMaxBound().getBlockX()) >> 4;
+        int maxChunkX = Math.max(arena.getMinBound().getBlockX(), arena.getMaxBound().getBlockX()) >> 4;
+        int minChunkZ = Math.min(arena.getMinBound().getBlockZ(), arena.getMaxBound().getBlockZ()) >> 4;
+        int maxChunkZ = Math.max(arena.getMinBound().getBlockZ(), arena.getMaxBound().getBlockZ()) >> 4;
+
+        int maxChunks = getForceLoadMaxChunks();
+        int spawnRadius = getForceLoadSpawnRadiusChunks();
+        LinkedHashSet<Long> selectedChunkKeys = new LinkedHashSet<>();
+        if (arena.getSpawn1() != null && arena.getSpawn1().getWorld() != null
+                && arena.getSpawn1().getWorld().getName().equalsIgnoreCase(targetWorld.getName())) {
+            collectPreheatChunks(selectedChunkKeys, arena.getSpawn1(), spawnRadius);
+        }
+        if (arena.getSpawn2() != null && arena.getSpawn2().getWorld() != null
+                && arena.getSpawn2().getWorld().getName().equalsIgnoreCase(targetWorld.getName())) {
+            collectPreheatChunks(selectedChunkKeys, arena.getSpawn2(), spawnRadius);
+        }
+
+        int centerChunkX = (minChunkX + maxChunkX) >> 1;
+        int centerChunkZ = (minChunkZ + maxChunkZ) >> 1;
+        selectedChunkKeys.add(packChunkKey(centerChunkX, centerChunkZ));
+
+        for (int cx = minChunkX; cx <= maxChunkX && selectedChunkKeys.size() < maxChunks; cx++) {
+            for (int cz = minChunkZ; cz <= maxChunkZ && selectedChunkKeys.size() < maxChunks; cz++) {
+                selectedChunkKeys.add(packChunkKey(cx, cz));
+            }
+        }
+
+        List<long[]> pending = new ArrayList<>();
+        for (Long key : selectedChunkKeys) {
+            if (key == null || forcedArenaChunks.contains(key)) {
+                continue;
+            }
+            int cx = unpackChunkX(key);
+            int cz = unpackChunkZ(key);
+            if (cx < minChunkX || cx > maxChunkX || cz < minChunkZ || cz > maxChunkZ) {
+                continue;
+            }
+            pending.add(new long[]{cx, cz, key});
+        }
+
+        if (pending.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        runChunkForceLoadBatch(targetWorld, pending, 0, getForceLoadChunksPerTick(), done);
+        return done;
+    }
+
+    private int getForceLoadChunksPerTick() {
+        return Math.max(1, plugin.getConfig().getInt("match.force-load-chunks-per-tick", 4));
+    }
+
+    private int getForceLoadMaxChunks() {
+        return Math.max(1, plugin.getConfig().getInt("match.force-load-max-chunks", 12));
+    }
+
+    private int getForceLoadSpawnRadiusChunks() {
+        return Math.max(0, plugin.getConfig().getInt("match.force-load-spawn-radius-chunks", 1));
+    }
+
+    private boolean shouldUseHardChunkPinning() {
+        return plugin.getConfig().getBoolean("match.force-load-hard-pin", false);
+    }
+
+    private void runChunkForceLoadBatch(World world,
+                                        List<long[]> pending,
+                                        int startIndex,
+                                        int perTick,
+                                        CompletableFuture<Void> done) {
+        if (done.isDone()) {
+            return;
+        }
+        if (startIndex >= pending.size()) {
+            done.complete(null);
+            return;
+        }
+
+        int end = Math.min(pending.size(), startIndex + Math.max(1, perTick));
+        List<CompletableFuture<Void>> stepFutures = new ArrayList<>();
+        for (int i = startIndex; i < end; i++) {
+            long[] entry = pending.get(i);
+            int chunkX = (int) entry[0];
+            int chunkZ = (int) entry[1];
+            long key = entry[2];
+            CompletableFuture<Void> one = new CompletableFuture<>();
+            stepFutures.add(one);
+            plugin.getServer().getRegionScheduler().run(plugin, world, chunkX, chunkZ, task -> {
+                try {
+                    if (shouldUseHardChunkPinning()) {
+                        world.setChunkForceLoaded(chunkX, chunkZ, true);
+                        forcedArenaChunks.add(key);
+                        one.complete(null);
+                        return;
+                    }
+                    world.getChunkAtAsync(chunkX, chunkZ, true)
+                            .whenComplete((chunk, ex) -> {
+                                if (ex != null) {
+                                    one.completeExceptionally(ex);
+                                } else {
+                                    one.complete(null);
+                                }
+                            });
+                } catch (Throwable ex) {
+                    one.completeExceptionally(ex);
+                }
+            });
+        }
+
+        CompletableFuture.allOf(stepFutures.toArray(new CompletableFuture[0]))
+                .whenComplete((v, ex) -> {
+                    if (ex != null) {
+                        done.completeExceptionally(ex);
+                        return;
+                    }
+                    plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin,
+                            task -> runChunkForceLoadBatch(world, pending, end, perTick, done), 1L);
+                });
+    }
+
+    private void releaseArenaChunksForceLoaded() {
+        if (forcedArenaChunks.isEmpty()) {
+            return;
+        }
+        World world = org.bukkit.Bukkit.getWorld(arena.getWorldName());
+        if (world == null && arena.getMinBound() != null) {
+            world = arena.getMinBound().getWorld();
+        }
+        if (world == null) {
+            forcedArenaChunks.clear();
+            return;
+        }
+        final World targetWorld = world;
+        for (Long key : new ArrayList<>(forcedArenaChunks)) {
+            int chunkX = (int) (key >> 32);
+            int chunkZ = (int) (key.longValue());
+            plugin.getServer().getRegionScheduler().run(plugin, targetWorld, chunkX, chunkZ, task -> {
+                try {
+                    targetWorld.setChunkForceLoaded(chunkX, chunkZ, false);
+                } catch (Throwable ignored) {
+                }
+            });
+        }
+        forcedArenaChunks.clear();
     }
 
     private CompletableFuture<Void> prepareAndTeleport(Player player, Location spawn, boolean isA) {
@@ -532,13 +788,11 @@ public class MatchSession {
                 returnLocationA = back;
                 if (mode.isRestoreBackupAfterMatch() && !resumedFromRecovery) {
                     snapshotA = new PlayerSnapshot(player);
-                    matchManager.addOrReplacePendingSnapshot(player.getUniqueId(), snapshotA);
                 }
             } else {
                 returnLocationB = back;
                 if (mode.isRestoreBackupAfterMatch() && !resumedFromRecovery) {
                     snapshotB = new PlayerSnapshot(player);
-                    matchManager.addOrReplacePendingSnapshot(player.getUniqueId(), snapshotB);
                 }
             }
             if (player.isInsideVehicle()) {
@@ -558,15 +812,15 @@ public class MatchSession {
             player.setSilent(false);
             player.setCollidable(true);
             clearCombatResidueOnPlayer(player);
-            if (!mode.isUsePlayerInventory()) {
-                PlayerStateUtil.reset(player);
-            }
         });
         return prep.thenCompose(v -> SchedulerUtil.teleport(plugin, player, spawn));
     }
 
     private CompletableFuture<Void> prepareForRoundTeleport(Player player, Location spawn) {
         CompletableFuture<Void> prep = SchedulerUtil.runOnPlayerFuture(plugin, player, () -> {
+            if (!mode.isUsePlayerInventory()) {
+                PlayerStateUtil.reset(player);
+            }
             if (player.isInsideVehicle()) {
                 player.leaveVehicle();
             }
@@ -584,91 +838,102 @@ public class MatchSession {
             player.setSilent(false);
             player.setCollidable(true);
             clearCombatResidueOnPlayer(player);
-            if (!mode.isUsePlayerInventory()) {
-                PlayerStateUtil.reset(player);
-            }
         });
         return prep.thenCompose(v -> SchedulerUtil.teleport(plugin, player, spawn));
     }
 
     private CompletableFuture<Void> captureArenaBaselineAsync() {
-        if (!mode.getSettings().isBuildEnabled()) {
+        if (!isRollbackActive()) {
             return CompletableFuture.completedFuture(null);
         }
-        // Full-region baseline capture is expensive and can delay round start.
-        // Default off: rely on per-block pre-change capture from break/place/explode listeners.
-        if (!plugin.getConfig().getBoolean("rollback.full-baseline-capture", false)) {
+        if (rollbackSessionInitialized) {
             return CompletableFuture.completedFuture(null);
         }
-        Location minBound = arena.getMinBound();
-        Location maxBound = arena.getMaxBound();
-        if (minBound == null || maxBound == null || minBound.getWorld() == null || maxBound.getWorld() == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        if (!minBound.getWorld().getName().equalsIgnoreCase(maxBound.getWorld().getName())) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        World world = minBound.getWorld();
-        int expand = getRollbackBoundsExpand();
-        int minX = Math.min(minBound.getBlockX(), maxBound.getBlockX()) - expand;
-        int maxX = Math.max(minBound.getBlockX(), maxBound.getBlockX()) + expand;
-        int minY = Math.min(minBound.getBlockY(), maxBound.getBlockY()) - expand;
-        int maxY = Math.max(minBound.getBlockY(), maxBound.getBlockY()) + expand;
-        int minZ = Math.min(minBound.getBlockZ(), maxBound.getBlockZ()) - expand;
-        int maxZ = Math.max(minBound.getBlockZ(), maxBound.getBlockZ()) + expand;
-
-        String worldName = world.getName();
-
-        int worldMinY = world.getMinHeight();
-        int worldMaxY = world.getMaxHeight() - 1;
-        minY = Math.max(worldMinY, minY);
-        maxY = Math.min(worldMaxY, maxY);
-        if (minY > maxY) {
-            return CompletableFuture.completedFuture(null);
-        }
-        final int captureMinY = minY;
-        final int captureMaxY = maxY;
-
-        List<CompletableFuture<Void>> chunkTasks = new ArrayList<>();
-        int minChunkX = minX >> 4;
-        int maxChunkX = maxX >> 4;
-        int minChunkZ = minZ >> 4;
-        int maxChunkZ = maxZ >> 4;
-        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
-                final int cx = chunkX;
-                final int cz = chunkZ;
-                final int startX = Math.max(minX, cx << 4);
-                final int endX = Math.min(maxX, (cx << 4) + 15);
-                final int startZ = Math.max(minZ, cz << 4);
-                final int endZ = Math.min(maxZ, (cz << 4) + 15);
-                CompletableFuture<Void> chunkFuture = new CompletableFuture<>();
-                chunkTasks.add(chunkFuture);
-                plugin.getServer().getRegionScheduler().run(plugin, world, cx, cz, task -> {
-                    try {
-                        Map<BlockKey, BlockData> captured = new LinkedHashMap<>();
-                        for (int x = startX; x <= endX; x++) {
-                            for (int z = startZ; z <= endZ; z++) {
-                                for (int y = captureMinY; y <= captureMaxY; y++) {
-                                    Block block = world.getBlockAt(x, y, z);
-                                    captured.put(new BlockKey(worldName, x, y, z), block.getBlockData().clone());
-                                }
-                            }
-                        }
-                        synchronized (originalArenaBlocks) {
-                            for (Map.Entry<BlockKey, BlockData> entry : captured.entrySet()) {
-                                originalArenaBlocks.putIfAbsent(entry.getKey(), entry.getValue());
-                            }
-                        }
-                        chunkFuture.complete(null);
-                    } catch (Throwable throwable) {
-                        chunkFuture.completeExceptionally(throwable);
+        rollbackSessionInitialized = true;
+        return matchManager.getRollbackService().initializeSession(recoverySessionId, arena.getId(), arena)
+                .whenComplete((v, ex) -> {
+                    if (ex != null) {
+                        rollbackSessionInitialized = false;
                     }
                 });
+    }
+
+    private boolean shouldPreheatArenaChunksOnFirstStart() {
+        return plugin.getConfig().getBoolean("match.preheat-arena-chunks-on-first-start", true);
+    }
+
+    private int getArenaPreheatRadiusChunks() {
+        return Math.max(0, plugin.getConfig().getInt("match.preheat-radius-chunks", 1));
+    }
+
+    private int getArenaPreheatChunksPerTick() {
+        return Math.max(1, plugin.getConfig().getInt("match.preheat-chunks-per-tick", 2));
+    }
+
+    private long getArenaPreheatStartDelayTicks() {
+        return Math.max(0L, plugin.getConfig().getLong("match.preheat-start-delay-ticks", 1L));
+    }
+
+    private void triggerArenaPreheatAsync() {
+        if (arenaPreheatTriggered || !shouldPreheatArenaChunksOnFirstStart()) {
+            return;
+        }
+        Location spawn1 = arena.getSpawn1();
+        Location spawn2 = arena.getSpawn2();
+        if (spawn1 == null || spawn2 == null || spawn1.getWorld() == null || spawn2.getWorld() == null) {
+            return;
+        }
+        if (!spawn1.getWorld().getName().equalsIgnoreCase(spawn2.getWorld().getName())) {
+            return;
+        }
+        arenaPreheatTriggered = true;
+
+        int radius = getArenaPreheatRadiusChunks();
+        Set<Long> chunkKeys = new HashSet<>();
+        collectPreheatChunks(chunkKeys, spawn1, radius);
+        collectPreheatChunks(chunkKeys, spawn2, radius);
+        World world = spawn1.getWorld();
+        List<Long> pendingChunks = new ArrayList<>(chunkKeys);
+        int perTick = getArenaPreheatChunksPerTick();
+        long startDelay = getArenaPreheatStartDelayTicks();
+        plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin,
+                task -> runArenaPreheatBatch(world, pendingChunks, 0, perTick), startDelay);
+    }
+
+    private void runArenaPreheatBatch(World world, List<Long> pendingChunks, int startIndex, int perTick) {
+        if (pendingChunks == null || pendingChunks.isEmpty() || world == null) {
+            return;
+        }
+        if (startIndex >= pendingChunks.size()) {
+            return;
+        }
+
+        int end = Math.min(pendingChunks.size(), startIndex + Math.max(1, perTick));
+        for (int i = startIndex; i < end; i++) {
+            long key = pendingChunks.get(i);
+            int chunkX = unpackChunkX(key);
+            int chunkZ = unpackChunkZ(key);
+            world.getChunkAtAsync(chunkX, chunkZ, true).exceptionally(ex -> null);
+        }
+
+        if (end < pendingChunks.size()) {
+            plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin,
+                    task -> runArenaPreheatBatch(world, pendingChunks, end, perTick), 1L);
+        }
+    }
+
+    private void collectPreheatChunks(Set<Long> chunkKeys, Location center, int radius) {
+        int centerChunkX = center.getBlockX() >> 4;
+        int centerChunkZ = center.getBlockZ() >> 4;
+        for (int x = centerChunkX - radius; x <= centerChunkX + radius; x++) {
+            for (int z = centerChunkZ - radius; z <= centerChunkZ + radius; z++) {
+                chunkKeys.add(packChunkKey(x, z));
             }
         }
-        return CompletableFuture.allOf(chunkTasks.toArray(new CompletableFuture[0]));
+    }
+
+    private boolean isRollbackActive() {
+        return mode.getSettings().isBuildEnabled() && mode.getSettings().isRollbackEnabled();
     }
 
     public boolean isInArenaRollbackArea(Location location) {
@@ -750,7 +1015,7 @@ public class MatchSession {
             int current = seconds.getAndDecrement();
             if (current <= 0) {
                 task.cancel();
-                startFight(p1, p2);
+                requestStartFight(p1, p2);
                 return;
             }
             showCountdown(p1, current);
@@ -758,8 +1023,84 @@ public class MatchSession {
         }, 1L, 20L);
     }
 
+    private void requestStartFight(Player p1, Player p2) {
+        if (fightStartPending) {
+            return;
+        }
+        fightStartPending = true;
+        waitArenaReadyAndStartFight(p1, p2, 0);
+    }
+
+    private void waitArenaReadyAndStartFight(Player p1, Player p2, int attempts) {
+        if (p1 == null || p2 == null || !p1.isOnline() || !p2.isOnline()) {
+            fightStartPending = false;
+            matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
+            return;
+        }
+        CompletableFuture<Void> future = preFightPrepareFuture;
+        if (future == null || future.isDone() || attempts >= 100) {
+            fightStartPending = false;
+            startFight(p1, p2);
+            return;
+        }
+        plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin,
+                task -> waitArenaReadyAndStartFight(p1, p2, attempts + 1), 2L);
+    }
+
+    private void startCountdownWhenArenaReady(Player p1, Player p2, long countdownDelayTicks, int attempts) {
+        if (p1 == null || p2 == null || !p1.isOnline() || !p2.isOnline()) {
+            matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
+            return;
+        }
+        if (matchManager.getMatch(p1) != this || matchManager.getMatch(p2) != this) {
+            return;
+        }
+
+        CompletableFuture<Void> future = preFightPrepareFuture;
+        if (future == null || future.isDone() || attempts >= 200) {
+            long totalDelay = Math.max(0L, countdownDelayTicks) + getCountdownStartStabilizeTicks();
+            if (nextRoundTask != null) {
+                nextRoundTask.cancel();
+                nextRoundTask = null;
+            }
+            nextRoundTask = plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task -> {
+                nextRoundTask = null;
+                if (!p1.isOnline() || !p2.isOnline()) {
+                    matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
+                    return;
+                }
+                if (matchManager.getMatch(p1) != this || matchManager.getMatch(p2) != this) {
+                    return;
+                }
+                startCountdown(p1, p2);
+            }, totalDelay);
+            return;
+        }
+
+        plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin,
+                task -> startCountdownWhenArenaReady(p1, p2, countdownDelayTicks, attempts + 1), 2L);
+    }
+
     private int getCountdownSeconds() {
         return Math.max(1, plugin.getConfig().getInt("match.countdown-seconds", 5));
+    }
+
+    private long getCountdownStartStabilizeTicks() {
+        return Math.max(0L, plugin.getConfig().getLong("match.countdown-start-stabilize-ticks", 10L));
+    }
+
+    private long getStateApplyStaggerTicks() {
+        return Math.max(0L, plugin.getConfig().getLong("match.state-apply-stagger-ticks", 1L));
+    }
+
+    private CompletableFuture<Void> waitStateApplyTicks() {
+        long ticks = getStateApplyStaggerTicks();
+        if (ticks <= 0L) {
+            return CompletableFuture.completedFuture(null);
+        }
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task -> future.complete(null), ticks);
+        return future;
     }
 
     private Duration getCountdownFadeIn() {
@@ -851,34 +1192,32 @@ public class MatchSession {
     private void startFight(Player p1, Player p2) {
         roundResolving = false;
         resolvingRound = 0;
+        endFlowIsolation(p1, p2);
         state = MatchState.FIGHTING;
         scheduleDuelTimeLimitIfNeeded();
         applyDuelPlayerListIsolation(p1, p2);
         matchManager.getPkManager().forceEnable(playerA);
         matchManager.getPkManager().forceEnable(playerB);
-        Location spawn1 = arena.getSpawn1();
-        Location spawn2 = arena.getSpawn2();
-        if (spawn1 != null) {
-            SchedulerUtil.teleport(plugin, p1, spawn1);
-        }
-        if (spawn2 != null) {
-            SchedulerUtil.teleport(plugin, p2, spawn2);
-        }
-        equipPlayer(p1);
-        equipPlayer(p2);
-        if (currentRound <= 1) {
-            MessageUtil.send(p1, "match_start");
-            MessageUtil.send(p2, "match_start");
-            matchManager.onMatchStarted(this);
-        } else {
-            sendRoundStartMessage(p1, p2);
-            sendRoundStartMessage(p2, p1);
-        }
-        matchManager.onArenaFightStarted(arena);
-        startHudTask();
-        updateRoundBossBar();
-        updateHealthBossBar();
-        updateRoundScoreboard();
+        equipPlayer(p1)
+                .thenCompose(v -> waitStateApplyTicks())
+                .thenCompose(v -> equipPlayer(p2))
+                .whenComplete((v, ex) -> {
+                    if (ex != null || !p1.isOnline() || !p2.isOnline()) {
+                        matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
+                        return;
+                    }
+                    if (currentRound <= 1) {
+                        MessageUtil.send(p1, "match_start");
+                        MessageUtil.send(p2, "match_start");
+                        matchManager.onMatchStarted(this);
+                    } else {
+                        sendRoundStartMessage(p1, p2);
+                        sendRoundStartMessage(p2, p1);
+                    }
+                    matchManager.onArenaFightStarted(arena);
+                    startHudTask();
+                    flushHudOnceDelayed();
+                });
     }
 
     private void startNextRound() {
@@ -886,92 +1225,78 @@ public class MatchSession {
     }
 
     private void startNextRound(long countdownDelayTicks) {
-        rollbackArenaChangesAsync().thenCompose(v -> cleanupArenaTransientArtifactsAsync()).whenComplete((rv, rex) -> {
-            state = MatchState.PREPARING;
-            // Close round-resolving window before spectator cleanup so delayed retry tasks
-            // cannot re-enter eliminated spectator mode during round reset/countdown.
-            roundResolving = false;
-            resolvingRound = 0;
-            matchManager.clearEliminatedSpectator(playerA);
-            matchManager.clearEliminatedSpectator(playerB);
+        state = MatchState.PREPARING;
+        roundResolving = false;
+        resolvingRound = 0;
+        matchManager.clearEliminatedSpectator(playerA);
+        matchManager.clearEliminatedSpectator(playerB);
 
-            Player p1 = plugin.getServer().getPlayer(playerA);
-            Player p2 = plugin.getServer().getPlayer(playerB);
-            if (p1 == null || p2 == null || !p1.isOnline() || !p2.isOnline()) {
-                matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
+        Player p1 = plugin.getServer().getPlayer(playerA);
+        Player p2 = plugin.getServer().getPlayer(playerB);
+        if (p1 == null || p2 == null || !p1.isOnline() || !p2.isOnline()) {
+            matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
+            return;
+        }
+        if (arena.getSpawn1() == null || arena.getSpawn2() == null) {
+            matchManager.endMatch(this, null, MatchManager.REASON_ARENA_SPAWN_UNSET);
+            return;
+        }
+
+        beginFlowIsolation(p1, p2);
+        preFightPrepareFuture = prepareArenaForFightAsync();
+        fightStartPending = false;
+
+        CompletableFuture<Void> prep = prepareForRoundTeleport(p1, arena.getSpawn1())
+                .thenCompose(v -> waitStateApplyTicks())
+                .thenCompose(v -> prepareForRoundTeleport(p2, arena.getSpawn2()));
+        prep.whenComplete((v, ex) -> {
+            if (ex != null) {
+                matchManager.endMatch(this, null, MatchManager.REASON_TELEPORT_FAILED);
                 return;
             }
-            if (arena.getSpawn1() == null || arena.getSpawn2() == null) {
-                matchManager.endMatch(this, null, MatchManager.REASON_ARENA_SPAWN_UNSET);
-                return;
-            }
-
-            CompletableFuture<Void> f1 = prepareForRoundTeleport(p1, arena.getSpawn1());
-            CompletableFuture<Void> f2 = prepareForRoundTeleport(p2, arena.getSpawn2());
-            CompletableFuture.allOf(f1, f2).thenCompose(v -> captureArenaBaselineAsync()).whenComplete((v, ex) -> {
-                if (ex != null) {
-                    matchManager.endMatch(this, null, MatchManager.REASON_TELEPORT_FAILED);
-                    return;
-                }
-                if (countdownDelayTicks <= 0L) {
-                    startCountdown(p1, p2);
-                    return;
-                }
-                if (nextRoundTask != null) {
-                    nextRoundTask.cancel();
-                    nextRoundTask = null;
-                }
-                nextRoundTask = plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task -> {
-                    nextRoundTask = null;
-                    if (!p1.isOnline() || !p2.isOnline()) {
-                        matchManager.endMatch(this, null, MatchManager.REASON_PLAYER_OFFLINE);
-                        return;
-                    }
-                    if (matchManager.getMatch(p1) != this || matchManager.getMatch(p2) != this) {
-                        return;
-                    }
-                    startCountdown(p1, p2);
-                }, countdownDelayTicks);
-            });
+            startCountdownWhenArenaReady(p1, p2, countdownDelayTicks, 0);
         });
     }
 
-    private void equipPlayer(Player player) {
-        SchedulerUtil.runOnPlayer(plugin, player, () -> {
-            if (!mode.isUsePlayerInventory()) {
-                PlayerStateUtil.reset(player);
-                mode.getKit().getItems().forEach(item -> player.getInventory().addItem(item.clone()));
-                List<ItemStack> armor = mode.getKit().getArmor();
-                if (!armor.isEmpty()) {
-                    ItemStack[] armorContents = new ItemStack[4];
-                    for (int i = 0; i < Math.min(4, armor.size()); i++) {
-                        armorContents[i] = armor.get(i).clone();
+    private CompletableFuture<Void> equipPlayer(Player player) {
+        CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
+        if (!mode.isUsePlayerInventory()) {
+            chain = chain.thenCompose(v -> SchedulerUtil.runOnPlayerFuture(plugin, player, () -> PlayerStateUtil.reset(player)))
+                    .thenCompose(v -> waitStateApplyTicks())
+                    .thenCompose(v -> SchedulerUtil.runOnPlayerFuture(plugin, player, () -> {
+                        mode.getKit().getItems().forEach(item -> player.getInventory().addItem(item.clone()));
+                        List<ItemStack> armor = mode.getKit().getArmor();
+                        if (!armor.isEmpty()) {
+                            ItemStack[] armorContents = new ItemStack[4];
+                            for (int i = 0; i < Math.min(4, armor.size()); i++) {
+                                armorContents[i] = armor.get(i).clone();
+                            }
+                            player.getInventory().setArmorContents(armorContents);
+                        }
+                        for (PotionEffect effect : mode.getKit().getPotionEffects()) {
+                            player.addPotionEffect(effect);
+                        }
+                    }));
+        }
+
+        return chain.thenCompose(v -> waitStateApplyTicks())
+                .thenCompose(v -> SchedulerUtil.runOnPlayerFuture(plugin, player, () -> {
+                    if (player.getAttribute(Attribute.GENERIC_MAX_HEALTH) != null) {
+                        player.getAttribute(Attribute.GENERIC_MAX_HEALTH).setBaseValue(mode.getSettings().getMaxHealth());
                     }
-                    player.getInventory().setArmorContents(armorContents);
-                }
-                for (PotionEffect effect : mode.getKit().getPotionEffects()) {
-                    player.addPotionEffect(effect);
-                }
-            }
-            if (player.getAttribute(Attribute.GENERIC_MAX_HEALTH) != null) {
-                player.getAttribute(Attribute.GENERIC_MAX_HEALTH).setBaseValue(mode.getSettings().getMaxHealth());
-            }
-            player.setHealth(mode.getSettings().getMaxHealth());
-            player.setFoodLevel(mode.getSettings().getHunger());
-            player.setSaturation(mode.getSettings().getSaturation());
-            player.setNoDamageTicks(mode.getSettings().getNoDamageTicks());
-            clearCombatResidueOnPlayer(player);
-            if (!mode.isUsePlayerInventory()) {
-                enforceKitInventory(player);
-            }
-            combatSnapshots.put(player.getUniqueId(), new CombatSnapshot(player));
-        });
+                    player.setHealth(mode.getSettings().getMaxHealth());
+                    player.setFoodLevel(mode.getSettings().getHunger());
+                    player.setSaturation(mode.getSettings().getSaturation());
+                    player.setNoDamageTicks(mode.getSettings().getNoDamageTicks());
+                    clearCombatResidueOnPlayer(player);
+                    if (!mode.isUsePlayerInventory()) {
+                        enforceKitInventory(player);
+                    }
+                    combatSnapshots.put(player.getUniqueId(), new CombatSnapshot(player));
+                }));
     }
 
     private CompletableFuture<Void> cleanupArenaTransientArtifactsAsync() {
-        if (!mode.getSettings().isBuildEnabled()) {
-            return CompletableFuture.completedFuture(null);
-        }
         Location minBound = arena.getMinBound();
         Location maxBound = arena.getMaxBound();
         if (minBound == null || maxBound == null || minBound.getWorld() == null || maxBound.getWorld() == null) {
@@ -1006,58 +1331,41 @@ public class MatchSession {
         final int areaMaxZ = maxZ;
 
         List<CompletableFuture<Void>> futures = new ArrayList<>();
-        int minChunkX = minX >> 4;
-        int maxChunkX = maxX >> 4;
-        int minChunkZ = minZ >> 4;
-        int maxChunkZ = maxZ >> 4;
+        Set<Long> candidateChunks = collectCleanupChunkCandidates(areaMinX, areaMaxX, areaMinZ, areaMaxZ);
 
-        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
-                final int cx = chunkX;
-                final int cz = chunkZ;
-                final int startX = Math.max(areaMinX, cx << 4);
-                final int endX = Math.min(areaMaxX, (cx << 4) + 15);
-                final int startZ = Math.max(areaMinZ, cz << 4);
-                final int endZ = Math.min(areaMaxZ, (cz << 4) + 15);
-                CompletableFuture<Void> chunkFuture = new CompletableFuture<>();
-                futures.add(chunkFuture);
-                plugin.getServer().getRegionScheduler().run(plugin, world, cx, cz, task -> {
-                    try {
-                        for (Entity entity : world.getChunkAt(cx, cz).getEntities()) {
-                            if (!(entity instanceof AbstractArrow
-                                    || entity instanceof Trident
-                                    || entity instanceof EnderCrystal
-                                    || entity instanceof TNTPrimed
-                                    || entity instanceof FallingBlock)) {
-                                continue;
-                            }
-                            Location location = entity.getLocation();
-                            if (location.getBlockX() < areaMinX || location.getBlockX() > areaMaxX
-                                    || location.getBlockY() < areaMinY || location.getBlockY() > areaMaxY
-                                    || location.getBlockZ() < areaMinZ || location.getBlockZ() > areaMaxZ) {
-                                continue;
-                            }
-                            entity.remove();
-                        }
-
-                        for (int x = startX; x <= endX; x++) {
-                            for (int z = startZ; z <= endZ; z++) {
-                                for (int y = areaMinY; y <= areaMaxY; y++) {
-                                    Block block = world.getBlockAt(x, y, z);
-                                    Material material = block.getType();
-                                    if (material == Material.FIRE || material == Material.SOUL_FIRE) {
-                                        block.setType(Material.AIR, false);
-                                    }
-                                }
-                            }
-                        }
-
+        for (long chunkKey : candidateChunks) {
+            final int cx = unpackChunkX(chunkKey);
+            final int cz = unpackChunkZ(chunkKey);
+            CompletableFuture<Void> chunkFuture = new CompletableFuture<>();
+            futures.add(chunkFuture);
+            plugin.getServer().getRegionScheduler().run(plugin, world, cx, cz, task -> {
+                try {
+                    if (!world.isChunkLoaded(cx, cz)) {
                         chunkFuture.complete(null);
-                    } catch (Throwable throwable) {
-                        chunkFuture.completeExceptionally(throwable);
+                        return;
                     }
-                });
-            }
+                    for (Entity entity : world.getChunkAt(cx, cz).getEntities()) {
+                        if (!(entity instanceof AbstractArrow
+                                || entity instanceof Trident
+                                || entity instanceof EnderCrystal
+                                || entity instanceof TNTPrimed
+                                || entity instanceof FallingBlock)) {
+                            continue;
+                        }
+                        Location location = entity.getLocation();
+                        if (location.getBlockX() < areaMinX || location.getBlockX() > areaMaxX
+                                || location.getBlockY() < areaMinY || location.getBlockY() > areaMaxY
+                                || location.getBlockZ() < areaMinZ || location.getBlockZ() > areaMaxZ) {
+                            continue;
+                        }
+                        entity.remove();
+                    }
+
+                    chunkFuture.complete(null);
+                } catch (Throwable throwable) {
+                    chunkFuture.completeExceptionally(throwable);
+                }
+            });
         }
 
         Player p1 = plugin.getServer().getPlayer(playerA);
@@ -1073,6 +1381,88 @@ public class MatchSession {
             return CompletableFuture.completedFuture(null);
         }
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+    }
+
+    private Set<Long> collectCleanupChunkCandidates(int areaMinX, int areaMaxX, int areaMinZ, int areaMaxZ) {
+        Set<Long> chunkKeys = new HashSet<>();
+
+        synchronized (originalArenaBlocks) {
+            for (BlockKey key : originalArenaBlocks.keySet()) {
+                addChunkCandidateForBlock(chunkKeys, key.x, key.z, areaMinX, areaMaxX, areaMinZ, areaMaxZ);
+            }
+            for (BlockKey key : playerPlacedBlocks) {
+                addChunkCandidateForBlock(chunkKeys, key.x, key.z, areaMinX, areaMaxX, areaMinZ, areaMaxZ);
+            }
+        }
+
+        addPlayerAreaChunkCandidates(chunkKeys, plugin.getServer().getPlayer(playerA), areaMinX, areaMaxX, areaMinZ, areaMaxZ);
+        addPlayerAreaChunkCandidates(chunkKeys, plugin.getServer().getPlayer(playerB), areaMinX, areaMaxX, areaMinZ, areaMaxZ);
+
+        if (chunkKeys.isEmpty()) {
+            int centerX = (areaMinX + areaMaxX) >> 1;
+            int centerZ = (areaMinZ + areaMaxZ) >> 1;
+            addChunkCandidateForBlock(chunkKeys, centerX, centerZ, areaMinX, areaMaxX, areaMinZ, areaMaxZ);
+        }
+
+        return chunkKeys;
+    }
+
+    private void addPlayerAreaChunkCandidates(Set<Long> chunkKeys,
+                                              Player player,
+                                              int areaMinX,
+                                              int areaMaxX,
+                                              int areaMinZ,
+                                              int areaMaxZ) {
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        Location location = player.getLocation();
+        int centerChunkX = location.getBlockX() >> 4;
+        int centerChunkZ = location.getBlockZ() >> 4;
+        for (int x = centerChunkX - 1; x <= centerChunkX + 1; x++) {
+            for (int z = centerChunkZ - 1; z <= centerChunkZ + 1; z++) {
+                addChunkCandidate(chunkKeys, x, z, areaMinX, areaMaxX, areaMinZ, areaMaxZ);
+            }
+        }
+    }
+
+    private void addChunkCandidateForBlock(Set<Long> chunkKeys,
+                                           int blockX,
+                                           int blockZ,
+                                           int areaMinX,
+                                           int areaMaxX,
+                                           int areaMinZ,
+                                           int areaMaxZ) {
+        addChunkCandidate(chunkKeys, blockX >> 4, blockZ >> 4, areaMinX, areaMaxX, areaMinZ, areaMaxZ);
+    }
+
+    private void addChunkCandidate(Set<Long> chunkKeys,
+                                   int chunkX,
+                                   int chunkZ,
+                                   int areaMinX,
+                                   int areaMaxX,
+                                   int areaMinZ,
+                                   int areaMaxZ) {
+        int chunkMinX = chunkX << 4;
+        int chunkMaxX = chunkMinX + 15;
+        int chunkMinZ = chunkZ << 4;
+        int chunkMaxZ = chunkMinZ + 15;
+        if (chunkMaxX < areaMinX || chunkMinX > areaMaxX || chunkMaxZ < areaMinZ || chunkMinZ > areaMaxZ) {
+            return;
+        }
+        chunkKeys.add(packChunkKey(chunkX, chunkZ));
+    }
+
+    private long packChunkKey(int chunkX, int chunkZ) {
+        return (((long) chunkX) << 32) ^ (chunkZ & 0xffffffffL);
+    }
+
+    private int unpackChunkX(long packed) {
+        return (int) (packed >> 32);
+    }
+
+    private int unpackChunkZ(long packed) {
+        return (int) packed;
     }
 
     private void clearCombatResidueOnPlayer(Player player) {
@@ -1181,7 +1571,12 @@ public class MatchSession {
 
     public void end(UUID winner, String reason) {
         roundResolving = false;
+        fightStartPending = false;
+        rollbackSessionInitialized = false;
+        arenaPreheatTriggered = false;
+        preFightPrepareFuture = CompletableFuture.completedFuture(null);
         state = MatchState.ENDING;
+        releaseArenaChunksForceLoaded();
         if (duelTimeLimitTask != null) {
             duelTimeLimitTask.cancel();
             duelTimeLimitTask = null;
@@ -1205,10 +1600,34 @@ public class MatchSession {
         Player p1 = plugin.getServer().getPlayer(playerA);
         Player p2 = plugin.getServer().getPlayer(playerB);
         if (p1 != null) {
+            endFlowIsolation(p1);
             handleEndForPlayer(p1, winner, reason, p1.isDead());
         }
         if (p2 != null) {
+            endFlowIsolation(p2);
             handleEndForPlayer(p2, winner, reason, p2.isDead());
+        }
+    }
+
+    private void beginFlowIsolation(Player... players) {
+        if (players == null) {
+            return;
+        }
+        for (Player player : players) {
+            if (player != null && player.isOnline()) {
+                PvpFlowIsolation.begin(plugin, player);
+            }
+        }
+    }
+
+    private void endFlowIsolation(Player... players) {
+        if (players == null) {
+            return;
+        }
+        for (Player player : players) {
+            if (player != null) {
+                PvpFlowIsolation.end(plugin, player);
+            }
         }
     }
 
@@ -1349,6 +1768,20 @@ public class MatchSession {
     private void normalizePostMatchState(Player player) {
         if (player == null) {
             return;
+        }
+        try {
+            if (player.getGameMode() == org.bukkit.GameMode.ADVENTURE) {
+                player.setGameMode(org.bukkit.GameMode.SURVIVAL);
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (player.getGameMode() != org.bukkit.GameMode.CREATIVE
+                    && player.getGameMode() != org.bukkit.GameMode.SPECTATOR) {
+                player.setFlying(false);
+                player.setAllowFlight(false);
+            }
+        } catch (Throwable ignored) {
         }
         try {
             player.setInvulnerable(false);
@@ -1583,6 +2016,23 @@ public class MatchSession {
         }, 1L, getHudUpdateInterval());
     }
 
+    private void flushHudOnceDelayed() {
+        plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task -> {
+            if (state != MatchState.FIGHTING) {
+                return;
+            }
+            Player p1 = plugin.getServer().getPlayer(playerA);
+            Player p2 = plugin.getServer().getPlayer(playerB);
+            if (p1 == null || p2 == null || !p1.isOnline() || !p2.isOnline()) {
+                return;
+            }
+            updateRoundBossBar();
+            updateHealthBossBar();
+            updateRoundScoreboard();
+            updateDuelTabs();
+        }, 2L);
+    }
+
     private boolean shouldRunHudPart(long intervalTicks) {
         long safe = Math.max(1L, intervalTicks);
         return hudTickCounter % safe == 0L;
@@ -1666,12 +2116,10 @@ public class MatchSession {
         }
         try {
             if (healthBossBarA != null) {
-                healthBossBarA.removeAll();
-                healthBossBarA = null;
+                healthBossBarA.setVisible(false);
             }
             if (healthBossBarB != null) {
-                healthBossBarB.removeAll();
-                healthBossBarB = null;
+                healthBossBarB.setVisible(false);
             }
         } catch (Throwable ignored) {
         }
@@ -1760,12 +2208,10 @@ public class MatchSession {
         }
         try {
             if (roundBossBarA != null) {
-                roundBossBarA.removeAll();
-                roundBossBarA = null;
+                roundBossBarA.setVisible(false);
             }
             if (roundBossBarB != null) {
-                roundBossBarB.removeAll();
-                roundBossBarB = null;
+                roundBossBarB.setVisible(false);
             }
         } catch (Throwable ignored) {
         }
@@ -2088,6 +2534,10 @@ public class MatchSession {
             clearDuelPlayerListIsolation();
             return;
         }
+        if (duelIsolationApplied) {
+            return;
+        }
+        duelIsolationApplied = true;
         applyDuelPlayerListIsolationFor(p1, p2);
         applyDuelPlayerListIsolationFor(p2, p1);
     }
@@ -2144,6 +2594,7 @@ public class MatchSession {
     }
 
     private void clearDuelPlayerListIsolation() {
+        duelIsolationApplied = false;
         if (duelHiddenPlayers.isEmpty()) {
             return;
         }
@@ -2173,6 +2624,12 @@ public class MatchSession {
 
     private void playRoundDefeatLightning(Player loser) {
         if (loser == null || !loser.isOnline()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        UUID loserId = loser.getUniqueId();
+        Long previous = recentDefeatLightningAt.put(loserId, now);
+        if (previous != null && now - previous < 1200L) {
             return;
         }
         Location location = loser.getLocation();
