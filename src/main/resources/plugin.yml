@@ -1,6 +1,6 @@
 name: PvPArena-Light
 main: com.pvparena.PvPArenaPlugin
-version: 1.0.8
+version: 1.0.9
 author: _RuCat
 api-version: '1.21'
 folia-supported: true

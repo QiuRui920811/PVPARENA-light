@@ -136,17 +136,13 @@ public class PlayerListener implements Listener {
                             if (!matchManager.hasPendingRestore(player.getUniqueId())) {
                                 return;
                             }
-                            boolean ok;
-                            try {
-                                ok = player.teleport(finalDestination);
-                            } catch (Throwable ignored) {
-                                ok = false;
-                            }
-                            if (ok) {
-                                debugRestore("join sync-teleport success consume " + player.getUniqueId());
-                                matchManager.consumePendingRestore(player);
-                                restorePvEntryIfNeeded(player);
-                            }
+                            player.teleportAsync(finalDestination).whenComplete((ok, ex) -> {
+                                if (Boolean.TRUE.equals(ok) && ex == null) {
+                                    debugRestore("join async-retry teleport success consume " + player.getUniqueId());
+                                    matchManager.consumePendingRestore(player);
+                                    restorePvEntryIfNeeded(player);
+                                }
+                            });
                         });
                     });
                 });
@@ -184,17 +180,13 @@ public class PlayerListener implements Listener {
                         if (!matchManager.hasPendingRestore(player.getUniqueId())) {
                             return;
                         }
-                        boolean ok;
-                        try {
-                            ok = player.teleport(fallback);
-                        } catch (Throwable ignored) {
-                            ok = false;
-                        }
-                        if (ok) {
-                            debugRestore("join failsafe sync-teleport success consume " + player.getUniqueId());
-                            matchManager.consumePendingRestore(player);
-                            restorePvEntryIfNeeded(player);
-                        }
+                        player.teleportAsync(fallback).whenComplete((ok, ex) -> {
+                            if (Boolean.TRUE.equals(ok) && ex == null) {
+                                debugRestore("join failsafe async-retry teleport success consume " + player.getUniqueId());
+                                matchManager.consumePendingRestore(player);
+                                restorePvEntryIfNeeded(player);
+                            }
+                        });
                     });
                 });
             });

@@ -31,6 +31,8 @@ modes:
       build:
         enabled: true             # Allow block place/break during fights; arena is rolled back automatically.
         break-placed-only: false  # true=only blocks placed during this match can be broken (protect arena map)
+      rollback:
+        enabled: true             # false=disable arena snapshot/rollback pipeline for this mode (lowest lag, no map restore)
       spectator:
         enabled: true
         eliminated-can-spectate: true  # dead players in team/round mode can spectate current round

@@ -23,6 +23,7 @@ import org.bukkit.event.player.PlayerInteractAtEntityEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.EquipmentSlot;
 
@@ -128,9 +129,9 @@ public class SpectatorListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onProjectileHit(ProjectileHitEvent event) {
-        if (event.getHitEntity() instanceof Player player && spectatorManager.isSpectating(player)) {
-            event.getEntity().remove();
-        }
+        // Do not forcibly remove projectiles here.
+        // Spectator damage immunity is handled in EntityDamageByEntityEvent,
+        // and removing on hit can swallow legitimate arrow damage due to timing/order.
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -188,6 +189,23 @@ public class SpectatorListener implements Listener {
     public void onSwapHands(PlayerSwapHandItemsEvent event) {
         if (spectatorManager.isSpectating(event.getPlayer())) {
             event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onMove(PlayerMoveEvent event) {
+        Player player = event.getPlayer();
+        if (!spectatorManager.isSpectating(player)) {
+            return;
+        }
+        try {
+            if (!player.getAllowFlight()) {
+                player.setAllowFlight(true);
+            }
+            if (!player.isFlying()) {
+                player.setFlying(true);
+            }
+        } catch (Throwable ignored) {
         }
     }
 }

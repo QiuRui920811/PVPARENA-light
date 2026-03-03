@@ -57,7 +57,42 @@ public class SpectatorManager {
     }
 
     public boolean isSpectating(Player player) {
-        return player != null && sessions.containsKey(player.getUniqueId());
+        if (player == null) {
+            return false;
+        }
+        UUID id = player.getUniqueId();
+        SpectatorSession session = sessions.get(id);
+        if (session == null) {
+            return false;
+        }
+
+        MatchSession liveMatch = matchManager.getMatch(player);
+        if (liveMatch != null && liveMatch.isFighting()) {
+            sessions.remove(id);
+            Set<UUID> watchers = spectatorsByTarget.get(session.targetId());
+            if (watchers != null) {
+                watchers.remove(id);
+                if (watchers.isEmpty()) {
+                    spectatorsByTarget.remove(session.targetId());
+                }
+            }
+            SchedulerUtil.runOnPlayer(plugin, player, () -> {
+                try {
+                    player.setInvisible(false);
+                    player.setInvulnerable(false);
+                    player.setCollidable(true);
+                    player.setCanPickupItems(true);
+                    player.setSilent(false);
+                    if (player.getGameMode() == GameMode.ADVENTURE) {
+                        player.setAllowFlight(false);
+                        player.setFlying(false);
+                    }
+                } catch (Throwable ignored) {
+                }
+            });
+            return false;
+        }
+        return true;
     }
 
     public boolean enterSpectator(Player spectator, Player target) {
@@ -102,6 +137,7 @@ public class SpectatorManager {
         SchedulerUtil.runOnPlayer(plugin, spectator, () -> {
             PlayerStateUtil.reset(spectator);
             boolean strictIsolation = settings.isSpectatorIgnoreRealEvents();
+            boolean applyHeavyVanish = giveTools && settings.isSpectatorVanish() && settings.isSpectatorHideFromPlayers();
             spectator.setGameMode(GameMode.ADVENTURE);
             spectator.setAllowFlight(true);
             spectator.setFlying(true);
@@ -116,8 +152,7 @@ public class SpectatorManager {
             } else {
                 spectator.getInventory().clear();
             }
-            if (settings.isSpectatorVanish() && settings.isSpectatorHideFromPlayers()) {
-                applyCmiVanish(spectator);
+            if (applyHeavyVanish) {
                 hideFromOthers(spectator);
                 applyHiddenNametagTeam(spectator);
                 startHideEnforcement(spectator);
@@ -194,11 +229,10 @@ public class SpectatorManager {
         }
 
         SchedulerUtil.runOnPlayer(plugin, spectator, () -> {
-            if (settings.isSpectatorVanish() && settings.isSpectatorHideFromPlayers()) {
+            if (session.toolsEnabled() && settings.isSpectatorVanish() && settings.isSpectatorHideFromPlayers()) {
                 stopHideEnforcement(spectator.getUniqueId());
                 removeHiddenNametagTeam(spectator);
                 showToOthers(spectator);
-                clearCmiVanish(spectator);
             }
             spectator.setInvisible(false);
             if (session.toolsEnabled()) {
@@ -222,6 +256,17 @@ public class SpectatorManager {
             } else {
                 // Eliminated-round temporary spectator: do not restore stale snapshot/location,
                 // let match round preparation restore normal combat state.
+                try {
+                    if (spectator.getGameMode() == GameMode.ADVENTURE) {
+                        spectator.setGameMode(GameMode.SURVIVAL);
+                    }
+                } catch (Throwable ignored) {
+                }
+                try {
+                    spectator.setFlying(false);
+                    spectator.setAllowFlight(false);
+                } catch (Throwable ignored) {
+                }
                 spectator.setCollidable(true);
                 spectator.setInvulnerable(false);
                 spectator.setCanPickupItems(true);

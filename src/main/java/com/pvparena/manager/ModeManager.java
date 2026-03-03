@@ -73,6 +73,7 @@ public class ModeManager {
             int nextRoundDelaySeconds = settingsSection != null ? settingsSection.getInt("next-round-delay-seconds", 0) : 0;
             int winnerLeaveDelaySeconds = settingsSection != null ? settingsSection.getInt("winner-leave-delay-seconds", 0) : 0;
             boolean buildEnabled = settingsSection == null || settingsSection.getBoolean("build.enabled", true);
+            boolean rollbackEnabled = settingsSection == null || settingsSection.getBoolean("rollback.enabled", buildEnabled);
             boolean breakPlacedBlocksOnly = settingsSection != null && settingsSection.getBoolean("build.break-placed-only", false);
             boolean dropOnFinalRoundOnly = settingsSection == null || settingsSection.getBoolean("inventory.drop-on-final-round-only", true);
             boolean spectatorEnabled = settingsSection == null || settingsSection.getBoolean("spectator.enabled", true);
@@ -82,7 +83,7 @@ public class ModeManager {
             nextRoundDelaySeconds = Math.max(0, Math.min(60, nextRoundDelaySeconds));
                 winnerLeaveDelaySeconds = Math.max(0, Math.min(300, winnerLeaveDelaySeconds));
             ModeSettings settings = new ModeSettings(maxHealth, hunger, saturation, noDamageTicks, legacyPvp, botEnabled,
-                        roundsToWin, nextRoundDelaySeconds, winnerLeaveDelaySeconds, buildEnabled, breakPlacedBlocksOnly,
+                        roundsToWin, nextRoundDelaySeconds, winnerLeaveDelaySeconds, buildEnabled, rollbackEnabled, breakPlacedBlocksOnly,
                         dropOnFinalRoundOnly,
                     spectatorEnabled, eliminatedCanSpectate, publicSpectatorEnabled);
             Set<String> preferredArenaIds = parsePreferredArenaIds(modeSection);

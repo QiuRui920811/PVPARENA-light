@@ -3,7 +3,9 @@ package com.pvparena.listener;
 import com.pvparena.config.PluginSettings;
 import com.pvparena.hook.husksync.HuskSyncWriteBack;
 import com.pvparena.manager.MatchManager;
+import com.pvparena.model.MatchState;
 import com.pvparena.model.MatchSession;
+import com.pvparena.util.PvpFlowIsolation;
 import com.pvparena.util.SchedulerUtil;
 import org.bukkit.Material;
 import org.bukkit.Location;
@@ -42,6 +44,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MatchListener implements Listener {
     private final MatchManager matchManager;
@@ -49,6 +52,8 @@ public class MatchListener implements Listener {
     private final PluginSettings settings;
     private final Map<UUID, List<ItemStack>> pendingDeathDrops = new ConcurrentHashMap<>();
     private final Map<UUID, Long> pendingEliminatedRespawn = new ConcurrentHashMap<>();
+    private final Map<UUID, io.papermc.paper.threadedregions.scheduler.ScheduledTask> autoRespawnTasks = new ConcurrentHashMap<>();
+    private final Map<UUID, io.papermc.paper.threadedregions.scheduler.ScheduledTask> flowIsolationReleaseTasks = new ConcurrentHashMap<>();
 
     public MatchListener(MatchManager matchManager, com.pvparena.manager.PkManager pkManager,
                          PluginSettings settings) {
@@ -59,7 +64,12 @@ public class MatchListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        pendingEliminatedRespawn.remove(event.getPlayer().getUniqueId());
+        UUID playerId = event.getPlayer().getUniqueId();
+        pendingEliminatedRespawn.remove(playerId);
+        cancelTask(autoRespawnTasks.remove(playerId));
+        cancelTask(flowIsolationReleaseTasks.remove(playerId));
+        org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
+        PvpFlowIsolation.end(plugin, event.getPlayer());
         matchManager.handleQuit(event.getPlayer());
     }
 
@@ -84,6 +94,8 @@ public class MatchListener implements Listener {
         if (!matchManager.isInMatch(player)) {
             return;
         }
+        org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
+        PvpFlowIsolation.begin(plugin, player);
 
         boolean dropInventoryMode = session != null && session.isDropInventoryMode();
         boolean dropInventoryThisDeath = shouldDropInventoryThisDeath(session, player.getUniqueId());
@@ -109,7 +121,6 @@ public class MatchListener implements Listener {
             debugCombat("drop death player=" + player.getName() + " dropsBefore=" + event.getDrops().size());
         }
 
-        org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
         long resolveDelayTicks = getRoundResolveDelayTicks();
         boolean alreadyResolving = session != null && session.isRoundResolving();
         if (!alreadyResolving) {
@@ -134,6 +145,7 @@ public class MatchListener implements Listener {
     @EventHandler
     public void onRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
+        org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
         boolean forceEliminatedState = consumePendingEliminatedRespawn(player.getUniqueId());
         MatchSession liveSession = matchManager.getMatch(player);
         if (liveSession != null && liveSession.isRoundResolving()) {
@@ -141,15 +153,16 @@ public class MatchListener implements Listener {
             if (winnerId != null) {
                 matchManager.enterRoundEliminatedSpectator(player.getUniqueId(), winnerId);
             }
-            org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
             scheduleEliminatedStateReapply(plugin, player, true);
+            scheduleFlowIsolationRelease(plugin, player);
+            return;
         } else if (forceEliminatedState) {
-            org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
             scheduleEliminatedStateReapply(plugin, player, false);
         }
         var snapshot = matchManager.peekPendingRestore(player);
         if (snapshot == null) {
             debugRestore("onRespawn no-pending " + player.getUniqueId());
+            scheduleFlowIsolationRelease(plugin, player);
             return;
         }
         debugRestore("onRespawn pending " + player.getUniqueId() + " " + snapshot.debugFingerprint());
@@ -157,7 +170,6 @@ public class MatchListener implements Listener {
         if (snapshot.getLocation() != null && snapshot.getLocation().getWorld() != null) {
             event.setRespawnLocation(snapshot.getLocation());
         }
-        org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
         long[] delays = isPluginEnabled(plugin, "HuskSync")
                 ? new long[]{2L, 20L, 60L}
                 : new long[]{1L};
@@ -193,6 +205,32 @@ public class MatchListener implements Listener {
                 }
             });
         }
+        scheduleFlowIsolationRelease(plugin, player);
+    }
+
+    private void scheduleFlowIsolationRelease(org.bukkit.plugin.java.JavaPlugin plugin, Player player) {
+        UUID playerId = player.getUniqueId();
+        cancelTask(flowIsolationReleaseTasks.remove(playerId));
+
+        AtomicInteger checks = new AtomicInteger(0);
+        io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
+                plugin.getServer().getGlobalRegionScheduler().runAtFixedRate(plugin, scheduled -> {
+                    if (!player.isOnline()) {
+                        cancelTask(flowIsolationReleaseTasks.remove(playerId));
+                        return;
+                    }
+                    if (checks.incrementAndGet() > 40) {
+                        PvpFlowIsolation.end(plugin, player);
+                        cancelTask(flowIsolationReleaseTasks.remove(playerId));
+                        return;
+                    }
+                    if (player.isDead() || matchManager.isInMatch(player)) {
+                        return;
+                    }
+                    PvpFlowIsolation.end(plugin, player);
+                    cancelTask(flowIsolationReleaseTasks.remove(playerId));
+                }, 2L, 5L);
+        flowIsolationReleaseTasks.put(playerId, task);
     }
 
     private void debugRestore(String msg) {
@@ -214,23 +252,46 @@ public class MatchListener implements Listener {
     }
 
     private void scheduleAutoRespawnRetries(org.bukkit.plugin.java.JavaPlugin plugin, Player player, long baseDelayTicks) {
-        long base = Math.max(1L, baseDelayTicks);
-        long[] attempts = new long[]{1L, 2L, 4L, 8L, base, base + 2L, base + 6L, base + 12L};
-        for (long delay : attempts) {
-            SchedulerUtil.runOnPlayerLater(plugin, player, delay, () -> {
-                if (!player.isOnline() || !player.isDead()) {
-                    return;
-                }
-                try {
-                    player.spigot().respawn();
-                    return;
-                } catch (Throwable ignored) {
-                }
-                try {
-                    player.getClass().getMethod("respawn").invoke(player);
-                } catch (Throwable ignored) {
-                }
-            });
+        UUID playerId = player.getUniqueId();
+        cancelTask(autoRespawnTasks.remove(playerId));
+
+        int maxAttempts = Math.max(8, Math.min(80, (int) (Math.max(1L, baseDelayTicks) * 4L)));
+        AtomicInteger attempts = new AtomicInteger(0);
+        io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
+                plugin.getServer().getGlobalRegionScheduler().runAtFixedRate(plugin, scheduled -> {
+                    if (!player.isOnline() || !player.isDead()) {
+                        cancelTask(autoRespawnTasks.remove(playerId));
+                        return;
+                    }
+                    if (attempts.incrementAndGet() > maxAttempts) {
+                        cancelTask(autoRespawnTasks.remove(playerId));
+                        return;
+                    }
+                    SchedulerUtil.runOnPlayer(plugin, player, () -> {
+                        if (!player.isOnline() || !player.isDead()) {
+                            return;
+                        }
+                        try {
+                            player.spigot().respawn();
+                            return;
+                        } catch (Throwable ignored) {
+                        }
+                        try {
+                            player.getClass().getMethod("respawn").invoke(player);
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }, 1L, 2L);
+        autoRespawnTasks.put(playerId, task);
+    }
+
+    private void cancelTask(io.papermc.paper.threadedregions.scheduler.ScheduledTask task) {
+        if (task == null) {
+            return;
+        }
+        try {
+            task.cancel();
+        } catch (Throwable ignored) {
         }
     }
 
@@ -258,6 +319,9 @@ public class MatchListener implements Listener {
     }
 
     private void applyEliminatedState(Player player) {
+        if (player == null || !matchManager.isSpectating(player)) {
+            return;
+        }
         try {
             player.setInvisible(true);
         } catch (Throwable ignored) {
@@ -328,6 +392,7 @@ public class MatchListener implements Listener {
                 return;
             }
             event.setCancelled(true);
+            dropInventoryNowIfNeeded(session, player);
             applyEnvironmentalFinisherFeedback(player);
 
             org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
@@ -355,7 +420,6 @@ public class MatchListener implements Listener {
             player.playEffect(EntityEffect.DEATH);
         } catch (Throwable ignored) {
         }
-        playRoundDeathLightning(player);
     }
 
     private boolean hasTotem(Player player) {
@@ -374,6 +438,31 @@ public class MatchListener implements Listener {
     public void onDamage(EntityDamageByEntityEvent event) {
         Entity damager = event.getDamager();
         Entity victim = event.getEntity();
+
+        if (victim instanceof Player victimPlayer && matchManager.isSpectating(victimPlayer)) {
+            if (!isActiveFighter(victimPlayer)) {
+                if (damager instanceof Projectile projectile) {
+                    projectile.remove();
+                }
+                event.setCancelled(true);
+                return;
+            }
+        }
+
+        if (damager instanceof Player damagerPlayer && matchManager.isSpectating(damagerPlayer)) {
+            if (!isActiveFighter(damagerPlayer)) {
+                event.setCancelled(true);
+                return;
+            }
+        }
+        if (damager instanceof Projectile projectile && projectile.getShooter() instanceof Player shooter
+                && matchManager.isSpectating(shooter)) {
+            if (!isActiveFighter(shooter)) {
+                projectile.remove();
+                event.setCancelled(true);
+                return;
+            }
+        }
 
         if (victim instanceof Player victimPlayer) {
             MatchSession victimSession = matchManager.getMatch(victimPlayer);
@@ -408,6 +497,8 @@ public class MatchListener implements Listener {
                     return;
                 }
                 event.setCancelled(true);
+                dropInventoryNowIfNeeded(victimSession, victimPlayer);
+                applyEnvironmentalFinisherFeedback(victimPlayer);
                 matchManager.handleDeath(victimPlayer);
                 return;
             }
@@ -426,6 +517,9 @@ public class MatchListener implements Listener {
                         return;
                     }
                     event.setCancelled(true);
+                    MatchSession botAsNormalMatch = matchManager.getMatch(victimPlayer);
+                    dropInventoryNowIfNeeded(botAsNormalMatch, victimPlayer);
+                    applyEnvironmentalFinisherFeedback(victimPlayer);
                     matchManager.handleDeath(victimPlayer);
                     return;
                 }
@@ -459,6 +553,8 @@ public class MatchListener implements Listener {
             debugCombat("skip non-match attacker=" + attacker.getName() + " victim=" + defender.getName());
             return;
         }
+        ensureCombatDamageState(attacker);
+        ensureCombatDamageState(defender);
         if (attackerMatch.isRoundResolving()) {
             event.setCancelled(true);
             debugCombat("cancel resolving attacker=" + attacker.getName() + " victim=" + defender.getName());
@@ -486,7 +582,6 @@ public class MatchListener implements Listener {
             double effectiveHealth = defender.getHealth() + Math.max(0.0, defender.getAbsorptionAmount());
             double lethalDamage = Math.max(0.0, event.getFinalDamage());
             attackerMatch.recordDamage(attacker.getUniqueId(), defender.getUniqueId(), Math.min(lethalDamage, effectiveHealth));
-            playRoundDeathLightning(defender);
 
             if (shouldUseVanillaDeathFlow(attackerMatch)) {
                 cachePendingDeathDrops(defender);
@@ -510,16 +605,12 @@ public class MatchListener implements Listener {
                 return;
             }
 
-            event.setCancelled(true);
+                event.setCancelled(true);
+            dropInventoryNowIfNeeded(attackerMatch, defender);
             applyFinisherFeedback(attacker, defender, lethalDamage);
-            org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
-            long resolveDelayTicks = attackerMatch.getRoundResolveDelayTicks();
-            SchedulerUtil.runOnPlayerLater(plugin, defender, resolveDelayTicks, () -> {
-                if (!defender.isOnline()) {
-                    return;
-                }
+            if (defender.isOnline()) {
                 matchManager.handleDeath(defender);
-            });
+            }
             return;
         }
         event.setCancelled(false);
@@ -528,9 +619,38 @@ public class MatchListener implements Listener {
         attackerMatch.recordDamage(attacker.getUniqueId(), defender.getUniqueId(), event.getFinalDamage());
     }
 
+    private void ensureCombatDamageState(Player player) {
+        if (player == null) {
+            return;
+        }
+        try {
+            player.setInvulnerable(false);
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (player.getGameMode() == org.bukkit.GameMode.ADVENTURE || player.getGameMode() == org.bukkit.GameMode.SURVIVAL) {
+                if (player.getAllowFlight()) {
+                    player.setAllowFlight(false);
+                }
+                if (player.isFlying()) {
+                    player.setFlying(false);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private boolean isActiveFighter(Player player) {
+        if (player == null) {
+            return false;
+        }
+        MatchSession session = matchManager.getMatch(player);
+        return session != null && session.isFighting();
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onEntityExplode(EntityExplodeEvent event) {
-        MatchSession session = getFightingSessionAt(event.getLocation());
+        MatchSession session = resolveExplosionSession(event.blockList(), event.getLocation());
         if (session == null) {
             return;
         }
@@ -554,7 +674,7 @@ public class MatchListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onBlockExplode(BlockExplodeEvent event) {
-        MatchSession session = getFightingSessionAt(event.getBlock().getLocation());
+        MatchSession session = resolveExplosionSession(event.blockList(), event.getBlock() == null ? null : event.getBlock().getLocation());
         if (session == null) {
             return;
         }
@@ -648,11 +768,11 @@ public class MatchListener implements Listener {
 
     private boolean useVanillaRoundDeathAnimation() {
         org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
-        return plugin.getConfig().getBoolean("match.round-end-use-vanilla-death-animation", true);
+        return plugin.getConfig().getBoolean("match.round-end-use-vanilla-death-animation", false);
     }
 
     private boolean shouldUseVanillaDeathFlow(MatchSession session) {
-        return (session != null && session.isDropInventoryMode()) || useVanillaRoundDeathAnimation();
+        return false;
     }
 
     private boolean shouldDropInventoryThisDeath(MatchSession session, UUID loserId) {
@@ -695,6 +815,54 @@ public class MatchListener implements Listener {
         pendingDeathDrops.put(player.getUniqueId(), items);
     }
 
+    private void dropInventoryNowIfNeeded(MatchSession session, Player player) {
+        if (player == null || session == null) {
+            return;
+        }
+        if (!shouldDropInventoryThisDeath(session, player.getUniqueId())) {
+            return;
+        }
+        Location location = player.getLocation();
+        if (location == null || location.getWorld() == null) {
+            return;
+        }
+
+        List<ItemStack> drops = new ArrayList<>();
+        for (ItemStack item : player.getInventory().getStorageContents()) {
+            if (item != null && item.getType() != Material.AIR && item.getAmount() > 0) {
+                drops.add(item.clone());
+            }
+        }
+        ItemStack offhand = player.getInventory().getItemInOffHand();
+        if (offhand != null && offhand.getType() != Material.AIR && offhand.getAmount() > 0) {
+            drops.add(offhand.clone());
+        }
+        for (ItemStack armor : player.getInventory().getArmorContents()) {
+            if (armor != null && armor.getType() != Material.AIR && armor.getAmount() > 0) {
+                drops.add(armor.clone());
+            }
+        }
+
+        try {
+            player.getInventory().clear();
+            player.getInventory().setArmorContents(new ItemStack[4]);
+            player.getInventory().setItemInOffHand(new ItemStack(Material.AIR));
+            player.setItemOnCursor(null);
+            pendingDeathDrops.remove(player.getUniqueId());
+        } catch (Throwable ignored) {
+        }
+
+        for (ItemStack item : drops) {
+            if (item == null || item.getType() == Material.AIR || item.getAmount() <= 0) {
+                continue;
+            }
+            try {
+                location.getWorld().dropItemNaturally(location, item);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     private void ensureDropFallbackFromCache(PlayerDeathEvent event, UUID playerId) {
         if (event == null || playerId == null) {
             return;
@@ -716,7 +884,22 @@ public class MatchListener implements Listener {
 
     private long getRoundResolveDelayTicks() {
         org.bukkit.plugin.java.JavaPlugin plugin = org.bukkit.plugin.java.JavaPlugin.getProvidingPlugin(getClass());
-        return Math.max(0L, Math.min(100L, plugin.getConfig().getLong("match.round-end-showcase-ticks", 12L)));
+        return Math.max(0L, Math.min(100L, plugin.getConfig().getLong("match.round-end-showcase-ticks", 0L)));
+    }
+
+    private MatchSession resolveExplosionSession(List<org.bukkit.block.Block> affectedBlocks, Location fallback) {
+        if (affectedBlocks != null && !affectedBlocks.isEmpty()) {
+            for (org.bukkit.block.Block block : affectedBlocks) {
+                if (block == null) {
+                    continue;
+                }
+                MatchSession session = getFightingSessionAt(block.getLocation());
+                if (session != null) {
+                    return session;
+                }
+            }
+        }
+        return getFightingSessionAt(fallback);
     }
 
     private MatchSession getFightingSessionAt(Location location) {
@@ -724,10 +907,13 @@ public class MatchListener implements Listener {
             return null;
         }
         for (MatchSession session : matchManager.getActiveMatchSessions()) {
-            if (session == null || !session.isFighting()) {
+            if (session == null) {
                 continue;
             }
             if (!session.getMode().getSettings().isBuildEnabled()) {
+                continue;
+            }
+            if (session.getState() == MatchState.ENDING) {
                 continue;
             }
             if (!session.isInArenaRollbackArea(location)) {
@@ -879,6 +1065,9 @@ public class MatchListener implements Listener {
     @EventHandler
     public void onMove(PlayerMoveEvent event) {
         Player player = event.getPlayer();
+        if (matchManager.isSpectating(player)) {
+            return;
+        }
         MatchSession session = matchManager.getMatch(player);
         if (session == null) {
             return;

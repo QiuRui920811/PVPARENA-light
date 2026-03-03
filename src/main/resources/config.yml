@@ -248,6 +248,7 @@ bigdoor:
 rollback:
   blocks-per-tick: 384 # WorldEdit-style batch size per chunk per tick
   bounds-expand: 5 # extra rollback border around arena bounds (recommended >=5 for crystal/explosion edge cleanup)
+  bounds-expand-y: 16 # Y 軸額外外擴（炸坑常往下超出 bounds，建議 >= 12）
   second-pass-delay-ticks: 12 # delayed verify pass (~0.6s) to catch late physics/explosion updates
   full-baseline-capture: true # scan whole arena before each round for reliable restore
   persist-baseline-to-db: false # true=write every changed block to crash-recovery DB (safer but slower in crystal/build modes)

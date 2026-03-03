@@ -44,12 +44,21 @@ public class SchedulerUtil {
             future.completeExceptionally(new IllegalStateException("Plugin disabled or invalid player/location"));
             return future;
         }
-        player.getScheduler().run(plugin, task -> player.teleportAsync(location)
-                .thenRun(() -> future.complete(null))
-                .exceptionally(ex -> {
-                    future.completeExceptionally(ex);
-                    return null;
-                }), null);
+        player.getScheduler().run(plugin, task -> {
+            if (location.getWorld() == null) {
+                future.completeExceptionally(new IllegalStateException("Teleport world is null"));
+                return;
+            }
+            int chunkX = location.getBlockX() >> 4;
+            int chunkZ = location.getBlockZ() >> 4;
+            location.getWorld().getChunkAtAsync(chunkX, chunkZ, true)
+                    .thenCompose(chunk -> player.teleportAsync(location))
+                    .thenRun(() -> future.complete(null))
+                    .exceptionally(ex -> {
+                        future.completeExceptionally(ex);
+                        return null;
+                    });
+        }, null);
         return future;
     }
 }

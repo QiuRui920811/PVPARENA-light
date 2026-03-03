@@ -11,6 +11,7 @@ public class ModeSettings {
     private final int nextRoundDelaySeconds;
     private final int winnerLeaveDelaySeconds;
     private final boolean buildEnabled;
+    private final boolean rollbackEnabled;
     private final boolean breakPlacedBlocksOnly;
     private final boolean dropOnFinalRoundOnly;
     private final boolean spectatorEnabled;
@@ -20,6 +21,7 @@ public class ModeSettings {
     public ModeSettings(double maxHealth, int hunger, float saturation, int noDamageTicks,
                         boolean legacyPvp, boolean botEnabled,
                         int roundsToWin, int nextRoundDelaySeconds, int winnerLeaveDelaySeconds, boolean buildEnabled,
+                        boolean rollbackEnabled,
                         boolean breakPlacedBlocksOnly, boolean dropOnFinalRoundOnly,
                         boolean spectatorEnabled, boolean eliminatedCanSpectate, boolean publicSpectatorEnabled) {
         this.maxHealth = maxHealth;
@@ -32,6 +34,7 @@ public class ModeSettings {
         this.nextRoundDelaySeconds = nextRoundDelaySeconds;
         this.winnerLeaveDelaySeconds = winnerLeaveDelaySeconds;
         this.buildEnabled = buildEnabled;
+        this.rollbackEnabled = rollbackEnabled;
         this.breakPlacedBlocksOnly = breakPlacedBlocksOnly;
         this.dropOnFinalRoundOnly = dropOnFinalRoundOnly;
         this.spectatorEnabled = spectatorEnabled;
@@ -77,6 +80,10 @@ public class ModeSettings {
 
     public boolean isBuildEnabled() {
         return buildEnabled;
+    }
+
+    public boolean isRollbackEnabled() {
+        return rollbackEnabled;
     }
 
     public boolean isBreakPlacedBlocksOnly() {

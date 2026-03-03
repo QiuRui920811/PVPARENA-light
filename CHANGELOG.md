@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.9
+
+### Changed
+- Match startup flow is staged across ticks to reduce same-tick load spikes.
+- Arena preheat is moved to startup warmup queue instead of running on duel accept.
+- Countdown start now waits for pre-fight preparation completion for smoother 5->4 transition.
+
+### Fixed
+- Explosion block edits are correctly allowed during round-resolving window.
+- Loser/player post-match state restoration now prevents being left in adventure mode.
+- Baseline warmup queue now pauses while active matches are running to avoid contention.
+
 ## 1.0.7
 
 ### Changed
