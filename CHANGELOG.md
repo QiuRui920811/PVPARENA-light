@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0
+
+### Changed
+- Replaced snapshot-style arena rollback with diff-based `ArenaChangeRecorder` + chunk task queue architecture.
+- Rollback execution now applies blocks in chunk-region batches with per-tick and per-nanos limits for smoother server frame times.
+- Baseline initialization is decoupled from duel start critical path to avoid countdown/start blocking.
+
+### Fixed
+- Corrected placement capture to store original block state before change, preventing placed blocks from remaining after rollback.
+- Expanded fluid rollback coverage with `BlockFormEvent` and `SpongeAbsorbEvent` tracking.
+- Added per-round transient cleanup for dropped items/experience orbs to reduce round-to-round residue.
+
 ## 1.0.9
 
 ### Changed

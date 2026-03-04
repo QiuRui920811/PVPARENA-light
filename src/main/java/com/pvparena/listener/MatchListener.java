@@ -23,9 +23,11 @@ import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockFormEvent;
 import org.bukkit.event.block.BlockFromToEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.block.SpongeAbsorbEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
@@ -1173,6 +1175,64 @@ public class MatchListener implements Listener {
         // Capture every fluid spread target so rollback can restore original block state.
         if (toInside) {
             matched.captureBlockBeforePlace(to.getState());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onBlockForm(BlockFormEvent event) {
+        if (event.getBlock() == null || event.getBlock().getWorld() == null) {
+            return;
+        }
+        MatchSession matched = null;
+        for (MatchSession session : matchManager.getActiveMatchSessions()) {
+            if (session == null || !session.isFighting()) {
+                continue;
+            }
+            if (!session.getMode().getSettings().isBuildEnabled()) {
+                continue;
+            }
+            if (!session.isInArenaRollbackArea(event.getBlock().getLocation())) {
+                continue;
+            }
+            matched = session;
+            break;
+        }
+        if (matched == null) {
+            return;
+        }
+        matched.captureBlockBeforePlace(event.getBlock().getState());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onSpongeAbsorb(SpongeAbsorbEvent event) {
+        if (event.getBlock() == null || event.getBlock().getWorld() == null) {
+            return;
+        }
+        MatchSession matched = null;
+        for (MatchSession session : matchManager.getActiveMatchSessions()) {
+            if (session == null || !session.isFighting()) {
+                continue;
+            }
+            if (!session.getMode().getSettings().isBuildEnabled()) {
+                continue;
+            }
+            if (!session.isInArenaRollbackArea(event.getBlock().getLocation())) {
+                continue;
+            }
+            matched = session;
+            break;
+        }
+        if (matched == null) {
+            return;
+        }
+        for (org.bukkit.block.BlockState state : event.getBlocks()) {
+            if (state == null || state.getWorld() == null) {
+                continue;
+            }
+            if (!matched.isInArenaRollbackArea(state.getLocation())) {
+                continue;
+            }
+            matched.captureBlockBeforePlace(state);
         }
     }
 

@@ -27,7 +27,9 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.AbstractArrow;
 import org.bukkit.entity.EnderCrystal;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.FallingBlock;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.TNTPrimed;
 import org.bukkit.entity.Trident;
@@ -389,7 +391,7 @@ public class MatchSession {
         if (!isInArenaRollbackArea(replacedState.getLocation())) {
             return;
         }
-        matchManager.getRollbackService().markDirty(recoverySessionId, replacedState.getBlock());
+        matchManager.getRollbackService().markDirtyOriginal(recoverySessionId, replacedState);
     }
 
     public void rollbackArenaChanges() {
@@ -410,6 +412,7 @@ public class MatchSession {
         }
 
         CompletableFuture<Void> rollbackFuture = matchManager.getRollbackService().rollbackAndClose(recoverySessionId)
+                .whenComplete((v, ex) -> rollbackSessionInitialized = false)
                 .exceptionally(ex -> null);
         return CompletableFuture.allOf(rollbackFuture, clearPlacedFuture);
     }
@@ -593,6 +596,7 @@ public class MatchSession {
         beginFlowIsolation(p1, p2);
         state = MatchState.PREPARING;
         preFightPrepareFuture = prepareArenaForFightAsync();
+        triggerBaselineInitAsync();
         fightStartPending = false;
         Location spawn1 = arena.getSpawn1();
         Location spawn2 = arena.getSpawn2();
@@ -611,8 +615,11 @@ public class MatchSession {
     private CompletableFuture<Void> prepareArenaForFightAsync() {
         return rollbackArenaChangesAsync()
                 .exceptionally(ex -> null)
-                .thenCompose(v -> cleanupArenaTransientArtifactsAsync().exceptionally(ex -> null))
-                .thenCompose(v -> captureArenaBaselineAsync().exceptionally(ex -> null));
+                .thenCompose(v -> cleanupArenaTransientArtifactsAsync().exceptionally(ex -> null));
+    }
+
+    private void triggerBaselineInitAsync() {
+        captureArenaBaselineAsync().exceptionally(ex -> null);
     }
 
     private boolean shouldForceLoadArenaChunks() {
@@ -846,7 +853,8 @@ public class MatchSession {
         if (!isRollbackActive()) {
             return CompletableFuture.completedFuture(null);
         }
-        if (rollbackSessionInitialized) {
+        if (rollbackSessionInitialized
+                && matchManager.getRollbackService().hasActiveSession(recoverySessionId)) {
             return CompletableFuture.completedFuture(null);
         }
         rollbackSessionInitialized = true;
@@ -957,10 +965,11 @@ public class MatchSession {
         }
 
         int expand = getRollbackBoundsExpand();
+        int expandY = getRollbackBoundsExpandY();
         int minX = Math.min(minBound.getBlockX(), maxBound.getBlockX()) - expand;
         int maxX = Math.max(minBound.getBlockX(), maxBound.getBlockX()) + expand;
-        int minY = Math.min(minBound.getBlockY(), maxBound.getBlockY()) - expand;
-        int maxY = Math.max(minBound.getBlockY(), maxBound.getBlockY()) + expand;
+        int minY = Math.min(minBound.getBlockY(), maxBound.getBlockY()) - expandY;
+        int maxY = Math.max(minBound.getBlockY(), maxBound.getBlockY()) + expandY;
         int minZ = Math.min(minBound.getBlockZ(), maxBound.getBlockZ()) - expand;
         int maxZ = Math.max(minBound.getBlockZ(), maxBound.getBlockZ()) + expand;
 
@@ -1244,6 +1253,7 @@ public class MatchSession {
 
         beginFlowIsolation(p1, p2);
         preFightPrepareFuture = prepareArenaForFightAsync();
+        triggerBaselineInitAsync();
         fightStartPending = false;
 
         CompletableFuture<Void> prep = prepareForRoundTeleport(p1, arena.getSpawn1())
@@ -1349,7 +1359,9 @@ public class MatchSession {
                                 || entity instanceof Trident
                                 || entity instanceof EnderCrystal
                                 || entity instanceof TNTPrimed
-                                || entity instanceof FallingBlock)) {
+                                || entity instanceof FallingBlock
+                                || entity instanceof Item
+                                || entity instanceof ExperienceOrb)) {
                             continue;
                         }
                         Location location = entity.getLocation();

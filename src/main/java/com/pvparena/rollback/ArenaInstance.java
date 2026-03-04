@@ -3,14 +3,14 @@ package com.pvparena.rollback;
 public class ArenaInstance {
     private final String sessionId;
     private final String arenaId;
-    private final ArenaSnapshot snapshot;
-    private final DirtyBlockTracker dirtyBlockTracker;
+    private final ArenaChangeRecorder changeRecorder;
+    private volatile boolean frozen;
 
-    public ArenaInstance(String sessionId, String arenaId, ArenaSnapshot snapshot, DirtyBlockTracker dirtyBlockTracker) {
+    public ArenaInstance(String sessionId, String arenaId, ArenaChangeRecorder changeRecorder) {
         this.sessionId = sessionId;
         this.arenaId = arenaId;
-        this.snapshot = snapshot;
-        this.dirtyBlockTracker = dirtyBlockTracker;
+        this.changeRecorder = changeRecorder;
+        this.frozen = false;
     }
 
     public String getSessionId() {
@@ -21,11 +21,15 @@ public class ArenaInstance {
         return arenaId;
     }
 
-    public ArenaSnapshot getSnapshot() {
-        return snapshot;
+    public ArenaChangeRecorder getChangeRecorder() {
+        return changeRecorder;
     }
 
-    public DirtyBlockTracker getDirtyBlockTracker() {
-        return dirtyBlockTracker;
+    public boolean isFrozen() {
+        return frozen;
+    }
+
+    public void freeze() {
+        this.frozen = true;
     }
 }
